@@ -203,6 +203,45 @@ async def chat_stream(prompt: str):
 
 Frontend can consume SSE and append tokens as they arrive.
 
+---
+
+## Provider wiring examples (OpenAI)
+
+Below are minimal wiring examples showing how to hook an OpenAI-style client into the router.
+
+Async OpenAI-style client (pseudo-code):
+
+```py
+from openai import AsyncOpenAI
+from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
+
+client = AsyncOpenAI(api_key="sk-...")
+router = ExtendedStreamingLLMRouter({
+    "openai": {"client": client, "default_model": "gpt-4"}
+})
+
+# The router will try to call `client.request(..., stream=True)` and consume
+# an async iterator of chunks when available. Adapt to your client API.
+async for token in router.chat_stream("Explain AI"):
+    print(token, end="", flush=True)
+```
+
+Sync OpenAI-style client (pseudo-code):
+
+```py
+from openai import OpenAI
+from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
+
+client = OpenAI(api_key="sk-...")  # hypothetical sync client
+router = ExtendedStreamingLLMRouter({"openai": {"client": client}})
+
+for token in router.chat_stream_sync("Explain AI"):
+    print(token, end="", flush=True)
+```
+
+Note: SDK method names and shapes vary — the router looks for a `client.request(op, payload, stream=True)`
+that returns an async iterator, or falls back to awaiting a full response and tokenizing it.
+
 
 ---
 
