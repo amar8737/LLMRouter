@@ -24,10 +24,14 @@ jobs:
           python-version: '3.x'
 
       - name: Install build tools
-        run: python -m pip install --upgrade pip build
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build setuptools wheel
 
       - name: Build distributions
-        run: python -m build
+        run: |
+          # build both sdist and wheel into dist/
+          python -m build --sdist --wheel --outdir dist
 
       # Publish to PyPI using a repository secret `PYPI_API_TOKEN` (twine)
       # Ensure you created the secret at: Settings → Secrets and variables → Actions
