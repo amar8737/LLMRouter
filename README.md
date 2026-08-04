@@ -1,6 +1,6 @@
 # LLMRouter
 
-See README_ENHANCED.md for full documentation and examples.
+See README_ENHANCED.md for full documentation and examples. See streaming guide: docs/STREAMING.md
 
 Quick start:
 
