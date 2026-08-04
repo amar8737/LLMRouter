@@ -147,7 +147,7 @@ class ExtendedStreamingLLMRouter:
         finally:
             loop.close()
 
-    def chat_stream_sync(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, **kwargs):
+    def chat_stream_sync(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, **kwargs):
         q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
         err = [None]
 
@@ -158,28 +158,47 @@ class ExtendedStreamingLLMRouter:
             async def run():
                 try:
                     async for tok in self.chat_stream(prompt, model, on_chunk=on_chunk, **kwargs):
+                        # allow cooperative cancellation via stop_event
+                        if stop_event and stop_event.is_set():
+                            break
                         q.put(("token", tok))
                     q.put(("done", None))
                 except Exception as e:
                     err[0] = e
                     q.put(("error", e))
 
-            loop.run_until_complete(run())
-            loop.close()
+            task = loop.create_task(run())
+
+            # watcher to cancel the task from another thread if stop_event is set
+            def watcher():
+                if not stop_event:
+                    return
+                stop_event.wait()
+                if not task.done():
+                    loop.call_soon_threadsafe(task.cancel)
+
+            watch_thread = threading.Thread(target=watcher, daemon=True)
+            watch_thread.start()
+
+            try:
+                loop.run_until_complete(task)
+            finally:
+                loop.close()
 
         thread = threading.Thread(target=producer, daemon=True)
         thread.start()
 
-        while True:
-            typ, data = q.get()
-            if typ == "error":
-                raise err[0]
-            if typ == "done":
-                break
-            if typ == "token":
-                yield data
-
-        thread.join(timeout=5)
+        try:
+            while True:
+                typ, data = q.get()
+                if typ == "error":
+                    raise err[0]
+                if typ == "done":
+                    break
+                if typ == "token":
+                    yield data
+        finally:
+            thread.join(timeout=5)
 
     def chat_stream_sync_complete(self, prompt: str, model: str = None, print_output: bool = False, **kwargs) -> str:
         out = ""
@@ -254,6 +273,7 @@ class ExtendedStreamingLLMRouter:
             loop.close()
 
     def responses_stream_sync(self, *args, model: str = None, on_chunk: Optional[Callable] = None, **kwargs):
+        stop_event: Optional[threading.Event] = kwargs.pop("stop_event", None)
         q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
         err = [None]
 
@@ -264,25 +284,42 @@ class ExtendedStreamingLLMRouter:
             async def run():
                 try:
                     async for tok in self.responses_stream(*args, model=model, on_chunk=on_chunk, **kwargs):
+                        if stop_event and stop_event.is_set():
+                            break
                         q.put(("token", tok))
                     q.put(("done", None))
                 except Exception as e:
                     err[0] = e
                     q.put(("error", e))
 
-            loop.run_until_complete(run())
-            loop.close()
+            task = loop.create_task(run())
+
+            def watcher():
+                if not stop_event:
+                    return
+                stop_event.wait()
+                if not task.done():
+                    loop.call_soon_threadsafe(task.cancel)
+
+            watch_thread = threading.Thread(target=watcher, daemon=True)
+            watch_thread.start()
+
+            try:
+                loop.run_until_complete(task)
+            finally:
+                loop.close()
 
         thread = threading.Thread(target=producer, daemon=True)
         thread.start()
 
-        while True:
-            typ, data = q.get()
-            if typ == "error":
-                raise err[0]
-            if typ == "done":
-                break
-            if typ == "token":
-                yield data
-
-        thread.join(timeout=5)
+        try:
+            while True:
+                typ, data = q.get()
+                if typ == "error":
+                    raise err[0]
+                if typ == "done":
+                    break
+                if typ == "token":
+                    yield data
+        finally:
+            thread.join(timeout=5)
