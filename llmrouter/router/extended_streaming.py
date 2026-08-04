@@ -5,6 +5,9 @@ import threading
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+import asyncio
+
+from ..utils.cancellation import background_task
 
 
 class StreamMode(Enum):
@@ -108,14 +111,28 @@ class ExtendedStreamingLLMRouter:
                 res = await self._maybe_await(res)
                 # If res is an async iterator
                 if hasattr(res, "__aiter__"):
-                    async for chunk in res:
-                        text = self._extract_text(chunk)
-                        for tok in self.tokenizer(text):
-                            if on_chunk:
-                                maybe = on_chunk(tok)
-                                if inspect.isawaitable(maybe):
-                                    await maybe
-                            yield tok
+                    q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+
+                    async def producer():
+                        try:
+                            async for chunk in res:
+                                await q.put(chunk)
+                        finally:
+                            await q.put(None)
+
+                    # run producer as a background task and ensure it's cancelled
+                    async with background_task(producer()):
+                        while True:
+                            chunk = await q.get()
+                            if chunk is None:
+                                break
+                            text = self._extract_text(chunk)
+                            for tok in self.tokenizer(text):
+                                if on_chunk:
+                                    maybe = on_chunk(tok)
+                                    if inspect.isawaitable(maybe):
+                                        await maybe
+                                yield tok
                     return
             except Exception:
                 pass

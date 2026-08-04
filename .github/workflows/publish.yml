@@ -42,15 +42,21 @@ jobs:
         run: |
           python -m build --sdist --wheel --outdir dist
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@v1
+        continue-on-error: true
 
       - name: Publish to PyPI (fallback with twine)
-        if: ${{ failure() && secrets.PYPI_API_TOKEN != '' }}
+        if: ${{ failure() }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          # Only attempt twine upload if a PyPI token is configured
+          if [ -z "$TWINE_PASSWORD" ]; then
+            echo "No PYPI_API_TOKEN present; skipping twine fallback."
+            exit 0
+          fi
           python -m pip install --upgrade pip
           pip install twine
           twine upload dist/* -u "$TWINE_USERNAME" -p "$TWINE_PASSWORD"

@@ -96,7 +96,12 @@ from llmrouter.router.streaming import StreamingLLMRouter
 
 def main():
     router = StreamingLLMRouter(composite)
-    for token in router.stream_sync("Explain AI"):
+    # Use a `stop_event` to cancel long-running streams from another thread.
+    import threading
+
+    stop_event = threading.Event()
+
+    for token in router.stream_sync("Explain AI", stop_event=stop_event):
         print(token, end="", flush=True)
     print()
 
@@ -177,6 +182,26 @@ while True:
     for token in router.stream_sync(user_input):
         print(token, end="", flush=True)
     print()
+```
+
+Example with stop_event (cancel from another thread):
+
+```py
+import threading
+from llmrouter.router.streaming import StreamingLLMRouter
+
+router = StreamingLLMRouter(composite)
+stop_event = threading.Event()
+
+def run_stream():
+    for token in router.stream_sync("Explain AI", stop_event=stop_event):
+        print(token, end="", flush=True)
+
+thread = threading.Thread(target=run_stream)
+thread.start()
+# ... later, cancel the stream:
+stop_event.set()
+thread.join()
 ```
 
 
