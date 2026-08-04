@@ -4,6 +4,9 @@ import time
 from ..metrics.metrics import MetricsCollector
 from ..middleware.base import BaseMiddleware
 from ..providers.composite_router import CompositeRouter
+from ..providers.provider_router import ProviderRouter
+from ..client.client_node import ClientNode
+from ..config.config import RouterConfig
 from ..retry.exponential import ExponentialRetry
 
 
@@ -70,4 +73,32 @@ class LLMRouter:
     async def responses(self, *args, **kwargs):
         payload = {"args": args, **kwargs}
         return await self._route_with_retry("responses", payload)
+
+    @classmethod
+    def from_config(cls, config: RouterConfig):
+        """Build an `LLMRouter` from a `RouterConfig` instance.
+
+        `config.providers` may contain already-built `ProviderRouter` objects
+        or dict-like provider descriptions of the form:
+
+        {"name": "openai", "clients": [{"api_key": "sk-..", "client": client_obj}, ...], "scheduler": scheduler}
+        """
+        providers = []
+        for p in config.providers:
+            if isinstance(p, ProviderRouter):
+                providers.append(p)
+                continue
+            # assume mapping-like
+            name = p.get("name") or p.get("provider")
+            raw_clients = p.get("clients", [])
+            scheduler = p.get("scheduler", config.scheduler)
+            clients = []
+            for rc in raw_clients:
+                api_key = rc.get("api_key") or rc.get("key")
+                client_obj = rc.get("client")
+                clients.append(ClientNode(api_key, client_obj, max_concurrent=config.max_concurrent_per_key))
+            providers.append(ProviderRouter(name, clients, scheduler=scheduler))
+
+        composite = CompositeRouter(providers)
+        return cls(composite, retry=config.retry, metrics=None, middleware=config.middleware, max_retries=config.max_retries)
 

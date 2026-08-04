@@ -7,7 +7,7 @@ name = "llmrouterx"
 version = "0.1.5"
 description = "Minimal llmrouterx MVP"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [ { name = "Amar Jeet Kushwaha", email = "babuamar455@gmail.com" } ]
 license = { text = "MIT" }
 keywords = ["llm", "router", "openai", "providers"]
