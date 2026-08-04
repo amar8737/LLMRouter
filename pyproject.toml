@@ -1,3 +1,29 @@
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmrouter"
+version = "0.1.0"
+description = "Minimal LLMRouter MVP"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [ { name = "Amar", email = "amar@example.com" } ]
+license = { text = "MIT" }
+keywords = ["llm", "router", "openai", "providers"]
+classifiers = [
+	"Development Status :: 4 - Beta",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3 :: Only",
+	"Programming Language :: Python :: 3.8",
+	"Programming Language :: Python :: 3.9",
+	"Programming Language :: Python :: 3.10",
+	"License :: OSI Approved :: MIT License",
+	"Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/amar8737/LLMRouter"
+Source = "https://github.com/amar8737/LLMRouter/"
+Tracker = "https://github.com/amar8737/LLMRouter/issues"
+

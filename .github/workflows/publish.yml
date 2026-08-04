@@ -1,12 +1,13 @@
-name: Publish
+name: Publish (OIDC-ready)
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: read
+  packages: write
   id-token: write
 
 jobs:
@@ -14,18 +15,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.12"
+          python-version: '3.x'
 
-      - name: Install build
-        run: |
-          python -m pip install --upgrade pip build
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build
 
-      - name: Build package
+      - name: Build distributions
         run: python -m build
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      # The following uses GitHub OIDC to obtain a short-lived token for PyPI
+      # via the pypa helper action. This avoids storing a long-lived PyPI API
+      # token in your repository secrets. To use this flow you must register
+      # GitHub as a Trusted Publisher in PyPI (one-time setup):
+      # https://pypi.org/manage/account/trusted-publishers/
+      - name: Exchange OIDC for PyPI token
+        id: pypi-token
+        uses: pypa/gh-action-get-pypi-token@v1
+
+      - name: Publish to PyPI (via pypa action)
+        uses: pypa/gh-action-pypi-publish@v1.6.0
+        with:
+          token: ${{ steps.pypi-token.outputs.token }}
+
+      # Note: If you prefer to keep using a PyPI API token stored in
+      # `PYPI_API_TOKEN` instead of OIDC, replace the two steps above with
+      # a simple twine upload using the secret. OIDC is recommended for
+      # improved security and no-secrets workflow.
