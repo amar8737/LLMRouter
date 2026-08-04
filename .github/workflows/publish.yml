@@ -35,6 +35,16 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+      - name: Publish to PyPI (fallback with twine)
+        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+          twine upload dist/* -u "$TWINE_USERNAME" -p "$TWINE_PASSWORD"
+
       # Notes:
       # - This uses GitHub OIDC (Trusted Publisher) automatically when the repository
       #   is registered on PyPI as a Trusted Publisher. If not registered yet,

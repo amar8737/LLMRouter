@@ -32,10 +32,13 @@ class LLMRouter:
     async def _route_with_retry(self, op: str, payload: dict):
         attempt = 0
         start = time.monotonic()
+
+        # Run before-middlewares once to avoid side-effects across retries
+        payload = await self._run_middlewares_before(op, payload)
+
         while True:
             try:
-                payload = await self._run_middlewares_before(op, payload)
-                resp = await self._composite.handle(op, payload,)
+                resp = await self._composite.handle(op, payload)
                 resp = await self._run_middlewares_after(op, payload, resp)
                 elapsed = time.monotonic() - start
                 self.metrics.incr(f"requests.{op}")
@@ -45,9 +48,15 @@ class LLMRouter:
                 attempt += 1
                 self.metrics.incr(f"errors.{op}")
                 if self.retry.should_retry(e, attempt):
-                    backoff = self.retry.get_backoff(attempt)
+                    backoff = self.retry.get_backoff(e, attempt)
+                    # record backoff in metrics
+                    try:
+                        self.metrics.timing(f"retry.backoff.{op}", backoff)
+                    except Exception:
+                        pass
                     await asyncio.sleep(backoff)
                     continue
+                # exhausted or non-retryable
                 raise
 
     async def chat(self, prompt: str, **kwargs):

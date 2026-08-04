@@ -1,29 +1,56 @@
-class ClientNode:
-    """Represents a single API key / client instance."""
+import asyncio
+from datetime import datetime, timedelta
 
-    def __init__(self, api_key: str, client):
+
+class ClientNode:
+    """Represents a single API key / client instance with basic health and concurrency control."""
+
+    FAILURE_THRESHOLD = 5
+    COOLDOWN_SECONDS = 30
+
+    def __init__(self, api_key: str, client, max_concurrent: int = 100):
         self.api_key = api_key
         self.client = client
-        self._healthy = True
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
         self.active_requests = 0
         self.last_success = None
         self.last_failure = None
         self.failures = 0
+        self.cooldown_until = None
 
     async def is_healthy(self) -> bool:
-        return bool(self._healthy)
+        async with self._lock:
+            if self.cooldown_until and datetime.utcnow() < self.cooldown_until:
+                return False
+            return self.failures < self.FAILURE_THRESHOLD
+
+    async def _record_success(self):
+        async with self._lock:
+            self.last_success = datetime.utcnow()
+            self.failures = max(0, self.failures - 1)
+
+    async def _record_failure(self):
+        async with self._lock:
+            self.last_failure = datetime.utcnow()
+            self.failures += 1
+            if self.failures >= self.FAILURE_THRESHOLD:
+                self.cooldown_until = datetime.utcnow() + timedelta(seconds=self.COOLDOWN_SECONDS)
 
     async def send(self, op: str, prompt: str, **kwargs):
-        # Track active requests for scheduling
-        self.active_requests += 1
-        try:
-            resp = await self.client.request(op, prompt, api_key=self.api_key, **kwargs)
-            self.last_success = True
-            self.failures = 0
-            return resp
-        except Exception:
-            self.last_failure = True
-            self.failures += 1
-            raise
-        finally:
-            self.active_requests = max(0, self.active_requests - 1)
+        # enforce max concurrent requests per key
+        async with self._semaphore:
+            async with self._lock:
+                self.active_requests += 1
+
+            try:
+                resp = await self.client.request(op, prompt, api_key=self.api_key, **kwargs)
+                await self._record_success()
+                return resp
+            except Exception:
+                await self._record_failure()
+                raise
+            finally:
+                async with self._lock:
+                    self.active_requests = max(0, self.active_requests - 1)
