@@ -31,6 +31,13 @@ class ProviderRouter:
 
         # Fallback simple scheduler: pick first healthy client
         for c in self.clients:
-            if await c.is_healthy():
-                return await c.send(op, *args, **kwargs)
+            try:
+                if await c.is_healthy():
+                    return await c.send(op, *args, **kwargs)
+            except Exception as e:
+                # Propagate cancellation immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                # otherwise log and continue to next client
+                continue
         raise NoHealthyClientError(f"No healthy clients for provider {self.name}")

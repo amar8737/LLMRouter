@@ -48,6 +48,9 @@ class LLMRouter:
                 self.metrics.timing(f"latency.{op}", elapsed)
                 return resp
             except Exception as e:
+                # Immediately propagate cancellation
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 attempt += 1
                 self.metrics.incr(f"errors.{op}")
                 if self.retry.should_retry(e, attempt):

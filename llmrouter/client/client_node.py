@@ -29,7 +29,10 @@ class ClientNode:
     async def _record_success(self):
         async with self._lock:
             self.last_success = datetime.utcnow()
-            self.failures = max(0, self.failures - 1)
+            # On success, fully recover failure count and clear cooldown so
+            # healthy clients rapidly return to service.
+            self.failures = 0
+            self.cooldown_until = None
 
     async def _record_failure(self):
         async with self._lock:
@@ -48,7 +51,10 @@ class ClientNode:
                 resp = await self.client.request(op, prompt, api_key=self.api_key, **kwargs)
                 await self._record_success()
                 return resp
-            except Exception:
+            except Exception as e:
+                # Do not treat cancellation as a failure metric — re-raise immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 await self._record_failure()
                 raise
             finally:

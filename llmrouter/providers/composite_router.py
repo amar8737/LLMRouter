@@ -29,6 +29,9 @@ class CompositeRouter:
                     self.metrics.incr(f"provider.no_healthy.{provider_name}")
                 continue
             except Exception as e:
+                # Propagate cancellation immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 logging.exception("provider %s failed: %s", provider_name, e)
                 last_exc = e
                 if self.metrics:
