@@ -1,4 +1,4 @@
-name: Publish (OIDC-ready)
+name: Publish
 
 on:
   push:
@@ -16,12 +16,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
       - name: Install build tools
         run: |
@@ -30,15 +30,21 @@ jobs:
 
       - name: Build distributions
         run: |
-          # build both sdist and wheel into dist/
           python -m build --sdist --wheel --outdir dist
 
-      # Publish to PyPI using a repository secret `PYPI_API_TOKEN` (twine)
-      # Ensure you created the secret at: Settings → Secrets and variables → Actions
-      - name: Publish to PyPI with twine
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          python -m pip install --upgrade twine
-          python -m twine upload --non-interactive dist/*
+      # Exchange GitHub OIDC token for a short-lived PyPI upload token.
+      # This requires registering GitHub as a Trusted Publisher on PyPI.
+      - name: Exchange OIDC for PyPI token
+        id: pypi-token
+        uses: pypa/gh-action-get-pypi-token@v1
+
+      - name: Publish to PyPI (via pypa action)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          token: ${{ steps.pypi-token.outputs.token }}
+
+      # Notes:
+      # - To use this OIDC flow you must register GitHub as a Trusted Publisher in PyPI:
+      #   https://pypi.org/manage/account/trusted-publishers/
+      # - If you prefer a token-based upload instead, replace the exchange/publish
+      #   steps with a `twine upload` step using a `PYPI_API_TOKEN` repository secret.
