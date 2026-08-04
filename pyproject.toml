@@ -27,3 +27,9 @@ Homepage = "https://github.com/amar8737/LLMRouter"
 Source = "https://github.com/amar8737/LLMRouter/"
 Tracker = "https://github.com/amar8737/LLMRouter/issues"
 
+[project.optional-dependencies]
+dev = [
+	"pytest",
+	"pytest-asyncio",
+]
+
