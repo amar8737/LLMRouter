@@ -1,0 +1,36 @@
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Iterable
+
+
+async def cancel_and_wait(task: asyncio.Task, timeout: float = 5.0):
+    """Cancel a task and wait up to `timeout` seconds for it to finish.
+
+    Silently swallow `CancelledError` and `TimeoutError` so callers can
+    continue cleanup.
+    """
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        pass
+
+
+async def cancel_tasks_and_wait(tasks: Iterable[asyncio.Task], timeout: float = 5.0):
+    await asyncio.gather(*(cancel_and_wait(t, timeout=timeout) for t in tasks))
+
+
+@asynccontextmanager
+async def background_task(coro):
+    """Run `coro` as a background task for the context lifetime and ensure
+    it's cancelled on exit.
+    """
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        await cancel_and_wait(task)
