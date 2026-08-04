@@ -32,19 +32,11 @@ jobs:
         run: |
           python -m build --sdist --wheel --outdir dist
 
-      # Exchange GitHub OIDC token for a short-lived PyPI upload token.
-      # This requires registering GitHub as a Trusted Publisher on PyPI.
-      - name: Exchange OIDC for PyPI token
-        id: pypi-token
-        uses: pypa/gh-action-get-pypi-token@v1
-
-      - name: Publish to PyPI (via pypa action)
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          token: ${{ steps.pypi-token.outputs.token }}
 
       # Notes:
-      # - To use this OIDC flow you must register GitHub as a Trusted Publisher in PyPI:
-      #   https://pypi.org/manage/account/trusted-publishers/
-      # - If you prefer a token-based upload instead, replace the exchange/publish
-      #   steps with a `twine upload` step using a `PYPI_API_TOKEN` repository secret.
+      # - This uses GitHub OIDC (Trusted Publisher) automatically when the repository
+      #   is registered on PyPI as a Trusted Publisher. If not registered yet,
+      #   either register GitHub as a Trusted Publisher on PyPI or replace this step
+      #   with a `twine upload` step that uses a `PYPI_API_TOKEN` repository secret.
