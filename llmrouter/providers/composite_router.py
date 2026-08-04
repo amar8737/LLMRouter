@@ -1,3 +1,6 @@
+import logging
+
+
 class CompositeRouter:
     """Routes between multiple ProviderRouter instances.
 
@@ -14,7 +17,8 @@ class CompositeRouter:
             try:
                 if await provider.is_healthy():
                     return await provider.handle(op, payload, **kwargs)
-            except Exception as e:
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("provider health check/handle failed: %s", e)
                 last_exc = e
                 continue
         if last_exc:

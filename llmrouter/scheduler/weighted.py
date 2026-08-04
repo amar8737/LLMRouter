@@ -1,5 +1,7 @@
 import random
 
+import logging
+
 from .base import BaseScheduler
 
 
@@ -16,7 +18,8 @@ class WeightedScheduler(BaseScheduler):
                 if await c.is_healthy():
                     w = getattr(c, "weight", 1) or 1
                     weighted.append((c, float(w)))
-            except Exception:
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("weighted scheduler: skipping client due to error: %s", e)
                 continue
         if not weighted:
             return None

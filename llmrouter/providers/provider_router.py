@@ -1,3 +1,5 @@
+import logging
+
 from ..exceptions import NoHealthyClientError
 
 
@@ -14,7 +16,8 @@ class ProviderRouter:
             try:
                 if await c.is_healthy():
                     return True
-            except Exception:
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("client health check failed for %s: %s", getattr(c, "api_key", "<client>"), e)
                 continue
         return False
 

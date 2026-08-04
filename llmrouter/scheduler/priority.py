@@ -1,3 +1,5 @@
+import logging
+
 from .base import BaseScheduler
 
 
@@ -18,7 +20,8 @@ class PriorityScheduler(BaseScheduler):
                 if await c.is_healthy():
                     pr = getattr(c, "priority", 100)
                     candidates.append((pr, c))
-            except Exception:
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("skipping client in priority scheduler due to error: %s", e)
                 continue
         if not candidates:
             return None

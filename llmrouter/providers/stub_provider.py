@@ -7,7 +7,7 @@ class StubClient:
     def __init__(self, name: str = "stub"):
         self.name = name
 
-    async def request(self, op: str, payload: dict, api_key: str = None, **kwargs):
+    async def request(self, op: str, payload: dict, api_key: str | None = None, **kwargs):
         await asyncio.sleep(0)
         # payload may include prompt or text etc.
         body = payload.get("prompt") or payload.get("text") or payload.get("args")

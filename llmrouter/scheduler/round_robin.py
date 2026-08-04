@@ -1,3 +1,5 @@
+import logging
+
 from .base import BaseScheduler
 
 
@@ -16,7 +18,8 @@ class RoundRobinScheduler(BaseScheduler):
             c = clients[(idx + i) % len(clients)]
             try:
                 healthy = await c.is_healthy()
-            except Exception:
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("round-robin: client health check failed: %s", e)
                 healthy = False
             if healthy:
                 self._indices[key] = (idx + i + 1) % len(clients)
