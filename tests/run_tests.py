@@ -1,14 +1,13 @@
 import asyncio
 
-from llmrouter.router.llmrouter import LLMRouter
+from llmrouter.client.client_node import ClientNode
+from llmrouter.metrics.metrics import MetricsCollector
 from llmrouter.providers.composite_router import CompositeRouter
 from llmrouter.providers.provider_router import ProviderRouter
-from llmrouter.client.client_node import ClientNode
 from llmrouter.providers.stub_provider import StubClient
-from llmrouter.scheduler.round_robin import RoundRobinScheduler
 from llmrouter.retry.exponential import ExponentialRetry
-from llmrouter.metrics.metrics import MetricsCollector
-
+from llmrouter.router.llmrouter import LLMRouter
+from llmrouter.scheduler.round_robin import RoundRobinScheduler
 
 
 async def main():

@@ -1,16 +1,13 @@
 import asyncio
-import random
 
-import pytest
-
-from llmrouter.providers.provider_router import ProviderRouter
 from llmrouter.client.client_node import ClientNode
+from llmrouter.providers.provider_router import ProviderRouter
 from llmrouter.providers.stub_provider import StubClient
-from llmrouter.scheduler.round_robin import RoundRobinScheduler
 from llmrouter.scheduler.least_busy import LeastBusyScheduler
-from llmrouter.scheduler.random import RandomScheduler
-from llmrouter.scheduler.weighted import WeightedScheduler
 from llmrouter.scheduler.priority import PriorityScheduler
+from llmrouter.scheduler.random import RandomScheduler
+from llmrouter.scheduler.round_robin import RoundRobinScheduler
+from llmrouter.scheduler.weighted import WeightedScheduler
 
 
 class SimpleNode(ClientNode):

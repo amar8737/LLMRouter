@@ -21,7 +21,7 @@ class ClientNode:
             self.last_success = True
             self.failures = 0
             return resp
-        except Exception as e:
+        except Exception:
             self.last_failure = True
             self.failures += 1
             raise

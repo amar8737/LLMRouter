@@ -1,9 +1,10 @@
 import asyncio
 import time
+
 from ..metrics.metrics import MetricsCollector
-from ..retry.exponential import ExponentialRetry
 from ..middleware.base import BaseMiddleware
 from ..providers.composite_router import CompositeRouter
+from ..retry.exponential import ExponentialRetry
 
 
 class LLMRouter:
