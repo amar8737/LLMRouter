@@ -1,66 +1,75 @@
-name: Publish
+name: Python application
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-
-concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
 
 jobs:
-  build-and-publish:
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+    - name: Install lint dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort pylint
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: Lint with flake8
+      continue-on-error: true
+      run: |
+        echo "Running flake8..."
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics || true
+    - name: Check formatting with black
+      continue-on-error: true
+      run: |
+        echo "Checking black formatting..."
+        black --check . 2>/dev/null || echo "⚠️  Some files need formatting (run: black .)"
+    - name: Check import sorting with isort
+      continue-on-error: true
+      run: |
+        echo "Checking import sorting..."
+        isort --check-only . 2>/dev/null || echo "⚠️  Some imports need sorting (run: isort .)"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel build twine
-          pip install -e .
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-
-      - name: Run tests (if tests exist)
-        timeout-minutes: 5
-        continue-on-error: true
-        run: |
-          if [ -d "tests" ] && [ -f "tests/run_tests.py" ]; then
-            echo "Running custom test runner..."
-            python tests/run_tests.py
-          else
-            echo "Running pytest..."
-            python -m pytest -v --tb=short
-          fi
-
-      - name: Build distributions
-        run: |
-          python -m build --sdist --wheel --outdir dist
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          if [ -z "$TWINE_PASSWORD" ]; then
-            echo "⚠️  No PYPI_API_TOKEN configured; skipping publish"
-            exit 0
-          fi
-          echo "📦 Publishing to PyPI..."
-          twine upload dist/* -u "$TWINE_USERNAME" -p "$TWINE_PASSWORD"
-          echo "✅ Published successfully"
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        # Install the package in editable mode so imports work
+        pip install -e .
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+        pip install pytest pytest-asyncio 2>/dev/null || true
+    
+    - name: Run tests
+      timeout-minutes: 10
+      run: |
+        if [ -d "tests" ] && [ -f "tests/run_tests.py" ]; then
+          echo "Running custom test runner..."
+          python tests/run_tests.py
+        else
+          echo "Running pytest..."
+          python -m pytest -v --tb=short
+        fi
