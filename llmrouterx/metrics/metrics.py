@@ -1,41 +1,122 @@
+from __future__ import annotations
 
-import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from statistics import mean, median
-from typing import Dict, List
+from threading import Lock
+from typing import Any
 
 
 class MetricsCollector:
-    """Thread-safe in-memory metrics collector for counters and timings."""
+    """
+    Thread-safe in-memory metrics collector.
 
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.counters: Dict[str, int] = defaultdict(int)
-        self.timings: Dict[str, List[float]] = defaultdict(list)
+    Keeps a bounded history of timings to avoid
+    unbounded memory growth.
+    """
 
-    def incr(self, key: str, amount: int = 1):
+    def __init__(
+        self,
+        *,
+        max_samples: int = 1000,
+    ) -> None:
+
+        self._lock = Lock()
+
+        self._max_samples = max_samples
+
+        self._counters: dict[str, int] = defaultdict(int)
+
+        self._timings: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=max_samples)
+        )
+
+    # -------------------------------------------------------
+    # Counters
+    # -------------------------------------------------------
+
+    def incr(
+        self,
+        key: str,
+        amount: int = 1,
+    ) -> None:
+
         with self._lock:
-            self.counters[key] += amount
+            self._counters[key] += amount
 
-    def timing(self, key: str, seconds: float):
-        with self._lock:
-            self.timings[key].append(seconds)
+    # -------------------------------------------------------
+    # Timings
+    # -------------------------------------------------------
 
-    def get(self):
-        with self._lock:
-            # shallow copy to avoid exposing internal structures
-            return {"counters": dict(self.counters), "timings": {k: list(v) for k, v in self.timings.items()}}
+    def timing(
+        self,
+        key: str,
+        seconds: float,
+    ) -> None:
 
-    def timing_stats(self, key: str):
         with self._lock:
-            vals = list(self.timings.get(key, []))
-        if not vals:
+            self._timings[key].append(seconds)
+
+    # -------------------------------------------------------
+    # Snapshot
+    # -------------------------------------------------------
+
+    def snapshot(self) -> dict[str, Any]:
+
+        with self._lock:
+
+            return {
+                "counters": dict(self._counters),
+                "timings": {
+                    key: list(values)
+                    for key, values in self._timings.items()
+                },
+            }
+
+    # Backward compatibility
+    get = snapshot
+
+    # -------------------------------------------------------
+    # Statistics
+    # -------------------------------------------------------
+
+    def timing_stats(
+        self,
+        key: str,
+    ) -> dict[str, float]:
+
+        with self._lock:
+            values = list(
+                self._timings.get(
+                    key,
+                    (),
+                )
+            )
+
+        if not values:
             return {}
-        vals.sort()
+
+        values.sort()
+
+        count = len(values)
+
         return {
-            "count": len(vals),
-            "min": vals[0],
-            "max": vals[-1],
-            "mean": mean(vals),
-            "median": median(vals),
+            "count": count,
+            "min": values[0],
+            "max": values[-1],
+            "mean": mean(values),
+            "median": median(values),
+            "p95": values[int(count * 0.95)],
+            "p99": values[int(count * 0.99)],
         }
+
+    # -------------------------------------------------------
+    # Reset
+    # -------------------------------------------------------
+
+    def reset(self) -> None:
+
+        with self._lock:
+
+            self._counters.clear()
+
+            self._timings.clear()

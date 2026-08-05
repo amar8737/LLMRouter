@@ -1,9 +1,7 @@
-import time
-
-from llmrouterx.providers.stub_provider import StubClient
 from llmrouterx.client.client_node import ClientNode
-from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.stub_provider import StubClient
 from llmrouterx.router.streaming import StreamingLLMRouter
 
 
@@ -21,6 +19,7 @@ def test_async_streaming_and_callback():
             received.append(token)
 
     import asyncio
+
     asyncio.run(run())
 
     assert len(received) > 0

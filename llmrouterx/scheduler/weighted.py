@@ -1,6 +1,5 @@
-import random
-
 import logging
+import random
 
 from .base import BaseScheduler
 

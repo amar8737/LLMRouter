@@ -38,11 +38,13 @@ Best for: FastAPI, async applications, modern Python 3.8+
 import asyncio
 from llmrouter import LLMRouter
 
+
 async def main():
     router = LLMRouter(...)
     # Blocks until complete response
     response = await router.handle_request("Explain AI in 100 words")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -53,11 +55,13 @@ asyncio.run(main())
 import asyncio
 from llmrouter.router.streaming import StreamingLLMRouter
 
+
 async def main():
     router = StreamingLLMRouter(composite)
     async for token in router.stream("Explain AI in 100 words"):
         print(token, end="", flush=True)
     print()
+
 
 asyncio.run(main())
 ```
@@ -81,10 +85,12 @@ Best for: CLI tools, scripts, non-async code
 ```py
 from llmrouter import LLMRouter
 
+
 def main():
     router = LLMRouter(...)
     response = router.handle_request_sync("Explain AI")
     print(response)
+
 
 main()
 ```
@@ -93,6 +99,7 @@ main()
 
 ```py
 from llmrouter.router.streaming import StreamingLLMRouter
+
 
 def main():
     router = StreamingLLMRouter(composite)
@@ -104,6 +111,7 @@ def main():
     for token in router.stream_sync("Explain AI", stop_event=stop_event):
         print(token, end="", flush=True)
     print()
+
 
 main()
 ```
@@ -122,6 +130,7 @@ Best for: GUI applications, event handlers, PyQt/Tkinter
 ```py
 import tkinter as tk
 
+
 class AIApp:
     def __init__(self):
         self.window = tk.Tk()
@@ -132,6 +141,7 @@ class AIApp:
         response = router.handle_request_sync("...")
         self.text_widget.insert(tk.END, response)
 
+
 app = AIApp()
 ```
 
@@ -140,6 +150,7 @@ app = AIApp()
 ```py
 import tkinter as tk
 import asyncio
+
 
 class AIApp:
     def __init__(self):
@@ -193,9 +204,11 @@ from llmrouter.router.streaming import StreamingLLMRouter
 router = StreamingLLMRouter(composite)
 stop_event = threading.Event()
 
+
 def run_stream():
     for token in router.stream_sync("Explain AI", stop_event=stop_event):
         print(token, end="", flush=True)
+
 
 thread = threading.Thread(target=run_stream)
 thread.start()
@@ -218,11 +231,13 @@ import json
 app = FastAPI()
 router = StreamingLLMRouter(composite)
 
+
 @app.post("/chat/stream")
 async def chat_stream(prompt: str):
     async def generate():
         async for token in router.stream(prompt):
             yield f"data: {json.dumps({'token': token})}\n\n"
+
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
@@ -241,9 +256,7 @@ from openai import AsyncOpenAI
 from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
 
 client = AsyncOpenAI(api_key="sk-...")
-router = ExtendedStreamingLLMRouter({
-    "openai": {"client": client, "default_model": "gpt-4"}
-})
+router = ExtendedStreamingLLMRouter({"openai": {"client": client, "default_model": "gpt-4"}})
 
 # The router will try to call `client.request(..., stream=True)` and consume
 # an async iterator of chunks when available. Adapt to your client API.

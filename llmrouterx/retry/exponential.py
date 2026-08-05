@@ -1,49 +1,119 @@
+from __future__ import annotations
+
 import asyncio
-import time
-from typing import Dict, Optional
+import random
+from typing import Any
 
 
 class HTTPError(Exception):
-    def __init__(self, status_code: int, message: str = "HTTP error", headers: Optional[Dict] = None):
+    """Generic HTTP error."""
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str = "HTTP error",
+        *,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(f"{status_code}: {message}")
         self.status_code = status_code
         self.headers = headers or {}
 
 
 class ExponentialRetry:
-    def __init__(self, max_retries: int = 3, base: float = 0.5, factor: float = 2.0, max_backoff: float = 60.0):
+    """
+    Exponential backoff retry policy.
+
+    Supports:
+    - Retry-After header
+    - Exponential backoff
+    - Jitter
+    - Max backoff
+    """
+
+    RETRYABLE_HTTP_STATUS = frozenset(
+        {
+            429,
+            500,
+            502,
+            503,
+            504,
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        max_retries: int = 3,
+        base: float = 0.5,
+        factor: float = 2.0,
+        max_backoff: float = 60.0,
+        jitter: bool = True,
+    ) -> None:
         self.max_retries = max_retries
         self.base = base
         self.factor = factor
         self.max_backoff = max_backoff
+        self.jitter = jitter
 
-    def should_retry(self, exc: Exception, attempt: int) -> bool:
+    def should_retry(
+        self,
+        exc: Exception,
+        attempt: int,
+    ) -> bool:
         if attempt >= self.max_retries:
             return False
 
-        # HTTP retryable status codes
         if isinstance(exc, HTTPError):
-            return exc.status_code in (429, 500, 502, 503, 504)
+            return exc.status_code in self.RETRYABLE_HTTP_STATUS
 
-        # Network/timeouts
-        if isinstance(exc, (TimeoutError, ConnectionError)):
-            return True
+        return isinstance(
+            exc,
+            (
+                asyncio.TimeoutError,
+                ConnectionError,
+            ),
+        )
 
-        return False
+    def get_backoff(
+        self,
+        exc: Exception,
+        attempt: int,
+    ) -> float:
+        """
+        Compute delay before next retry.
+        """
 
-    def get_backoff(self, exc: Exception, attempt: int) -> float:
-        # If HTTP 429 and Retry-After header present, honor it
-        if isinstance(exc, HTTPError) and exc.status_code == 429:
+        if isinstance(exc, HTTPError):
             retry_after = exc.headers.get("Retry-After")
-            if retry_after:
+
+            if retry_after is not None:
                 try:
-                    return min(float(retry_after), self.max_backoff)
-                except Exception:
+                    return min(
+                        float(retry_after),
+                        self.max_backoff,
+                    )
+                except ValueError:
                     pass
 
-        # jitterless exponential backoff (attempt is 1-based)
-        backoff = self.base * (self.factor ** (attempt - 1))
-        return min(backoff, self.max_backoff)
+        delay = min(
+            self.base * (self.factor ** (attempt - 1)),
+            self.max_backoff,
+        )
 
-    async def wait(self, exc: Exception, attempt: int):
-        await asyncio.sleep(self.get_backoff(exc, attempt))
+        if self.jitter:
+            delay *= random.uniform(0.5, 1.5)
+
+        return delay
+
+    async def wait(
+        self,
+        exc: Exception,
+        attempt: int,
+    ) -> None:
+        await asyncio.sleep(
+            self.get_backoff(
+                exc,
+                attempt,
+            )
+        )

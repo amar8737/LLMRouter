@@ -41,7 +41,11 @@ def test_round_robin_rotates():
 
 def test_least_busy_selects_least_active():
     client = StubClient("b")
-    nodes = [SimpleNode("k0", client, active=5), SimpleNode("k1", client, active=1), SimpleNode("k2", client, active=3)]
+    nodes = [
+        SimpleNode("k0", client, active=5),
+        SimpleNode("k1", client, active=1),
+        SimpleNode("k2", client, active=3),
+    ]
     provider = ProviderRouter("prov2", nodes)
     ls = LeastBusyScheduler()
 

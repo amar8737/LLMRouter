@@ -81,25 +81,27 @@ from llmrouterx import LLMRouter
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
+
 async def main():
     # Create an OpenAI client
     client = AsyncOpenAI(api_key="sk-your-key-here")
-    
+
     # Wrap it in a ClientNode (tracks identity and health)
     node = ClientNode("key-1", client)
-    
+
     # Create a provider (represents a service like OpenAI)
     provider = ProviderRouter("openai", [node])
-    
+
     # Create a composite router (aggregates providers)
     composite = CompositeRouter([provider])
-    
+
     # Create the router
     router = LLMRouter(composite)
-    
+
     # Make a request
     response = await router.chat(prompt="Hello, what's 2+2?")
     print(response)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -124,15 +126,17 @@ from llmrouterx import LLMRouter
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
+
 async def main():
     client = AsyncOpenAI(api_key="sk-...")
     node = ClientNode("sk-...", client)
     provider = ProviderRouter("openai", [node])
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -149,21 +153,19 @@ from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
+
 async def main():
     keys = ["sk-key1", "sk-key2", "sk-key3"]
     nodes = [ClientNode(key, AsyncOpenAI(api_key=key)) for key in keys]
-    
+
     # LeastBusyScheduler rotates across keys, avoiding rate limits
-    provider = ProviderRouter(
-        "openai",
-        nodes,
-        scheduler=LeastBusyScheduler()
-    )
+    provider = ProviderRouter("openai", nodes, scheduler=LeastBusyScheduler())
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -181,22 +183,24 @@ from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
+
 async def main():
     # Primary: OpenAI
     openai_node = ClientNode("sk-...", AsyncOpenAI(api_key="sk-..."))
     openai_provider = ProviderRouter("openai", [openai_node], scheduler=LeastBusyScheduler())
-    
+
     # Fallback: Groq
     groq_node = ClientNode("gsk-...", AsyncGroq(api_key="gsk-..."))
     groq_provider = ProviderRouter("groq", [groq_node], scheduler=LeastBusyScheduler())
-    
+
     # CompositeRouter tries providers in order; if first fails, tries next
     composite = CompositeRouter([openai_provider, groq_provider])
     router = LLMRouter(composite)
-    
+
     # If OpenAI fails, automatically falls back to Groq
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -209,13 +213,15 @@ asyncio.run(main())
 import asyncio
 from llmrouterx import LLMRouter
 
+
 async def main():
     router = LLMRouter(composite)  # from previous examples
-    
+
     # Stream response chunks
     async for chunk in router.stream(prompt="Tell me a story"):
         print(chunk, end="", flush=True)
     print()
+
 
 asyncio.run(main())
 ```
@@ -228,18 +234,18 @@ asyncio.run(main())
 import asyncio
 from llmrouterx import LLMRouter
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     # Make 10 concurrent requests
     prompts = [f"Request {i}: tell me a fact" for i in range(10)]
-    responses = await asyncio.gather(*[
-        router.chat(prompt=p) for p in prompts
-    ])
-    
+    responses = await asyncio.gather(*[router.chat(prompt=p) for p in prompts])
+
     print(f"Got {len(responses)} responses")
     for i, resp in enumerate(responses):
         print(f"{i}: {resp[:100]}...")
+
 
 asyncio.run(main())
 ```
@@ -254,10 +260,10 @@ from llmrouterx import LLMRouter
 
 # Retry with exponential backoff
 retry = ExponentialRetry(
-    max_retries=5,       # Try up to 5 times
-    base=0.5,            # Start with 0.5 second wait
-    factor=2.0,          # Double wait time each retry
-    max_backoff=30.0     # Cap wait at 30 seconds
+    max_retries=5,  # Try up to 5 times
+    base=0.5,  # Start with 0.5 second wait
+    factor=2.0,  # Double wait time each retry
+    max_backoff=30.0,  # Cap wait at 30 seconds
 )
 
 router = LLMRouter(composite, retry=retry)
@@ -271,18 +277,23 @@ router = LLMRouter(composite, retry=retry)
 import asyncio
 from llmrouterx import LLMRouter
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     # Make some requests
     for i in range(10):
         await router.chat(prompt=f"Request {i}")
-    
+
     # View metrics
     metrics = router.metrics.get()
     print("Total requests:", metrics["counters"].get("total_requests", 0))
     print("Total errors:", metrics["counters"].get("total_errors", 0))
-    print("Average latency:", sum(metrics["timings"]) / len(metrics["timings"]) if metrics["timings"] else 0)
+    print(
+        "Average latency:",
+        sum(metrics["timings"]) / len(metrics["timings"]) if metrics["timings"] else 0,
+    )
+
 
 asyncio.run(main())
 ```
@@ -299,14 +310,16 @@ from llmrouterx import LLMRouter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class LoggingMiddleware(BaseMiddleware):
     async def before_request(self, op, payload):
         logger.info(f"→ {op}: {payload}")
         return payload
-    
+
     async def after_response(self, op, payload, response):
         logger.info(f"← {op}: response received")
         return response
+
 
 # Use it
 router = LLMRouter(composite, middleware=[LoggingMiddleware()])
@@ -318,18 +331,18 @@ router = LLMRouter(composite, middleware=[LoggingMiddleware()])
 
 ```python
 from llmrouterx.scheduler import (
-    LeastBusyScheduler,      # Pick client with fewest active requests
-    RoundRobinScheduler,     # Rotate through clients sequentially
-    RandomScheduler,         # Pick random client
-    WeightedScheduler,       # Pick by node.weight property
-    PriorityScheduler,       # Pick by node.priority property
+    LeastBusyScheduler,  # Pick client with fewest active requests
+    RoundRobinScheduler,  # Rotate through clients sequentially
+    RandomScheduler,  # Pick random client
+    WeightedScheduler,  # Pick by node.weight property
+    PriorityScheduler,  # Pick by node.priority property
 )
 
 # Use any scheduler
 provider = ProviderRouter(
     "name",
     nodes,
-    scheduler=LeastBusyScheduler()  # or any scheduler above
+    scheduler=LeastBusyScheduler(),  # or any scheduler above
 )
 ```
 
@@ -356,15 +369,17 @@ import asyncio
 from llmrouterx import LLMRouter
 from llmrouterx.exceptions import NoHealthyClientError
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     try:
         response = await router.chat(prompt="Hello!")
     except NoHealthyClientError as e:
         print(f"All providers are down: {e}")
     except Exception as e:
         print(f"Request failed: {e}")
+
 
 asyncio.run(main())
 ```
@@ -389,7 +404,7 @@ Aggregates multiple ClientNodes for a single provider (e.g., OpenAI with 3 keys)
 provider = ProviderRouter(
     "openai",  # Provider name
     [node1, node2, node3],  # List of nodes
-    scheduler=LeastBusyScheduler()  # How to select among nodes
+    scheduler=LeastBusyScheduler(),  # How to select among nodes
 )
 ```
 
@@ -438,6 +453,7 @@ print(metrics["timings"])  # [0.45, 0.52, 0.38, ...]
 ```python
 from llmrouterx.scheduler import BaseScheduler
 
+
 class MyScheduler(BaseScheduler):
     async def select(self, provider_router):
         candidates = [c for c in provider_router.clients if await c.is_healthy()]
@@ -445,6 +461,7 @@ class MyScheduler(BaseScheduler):
             return None
         # Your logic here
         return candidates[0]
+
 
 provider = ProviderRouter("name", nodes, scheduler=MyScheduler())
 ```
@@ -454,14 +471,16 @@ provider = ProviderRouter("name", nodes, scheduler=MyScheduler())
 ```python
 from llmrouterx.middleware import BaseMiddleware
 
+
 class MyMiddleware(BaseMiddleware):
     async def before_request(self, op, payload):
         # Modify request before sending
         return payload
-    
+
     async def after_response(self, op, payload, response):
         # Transform response after receiving
         return response
+
 
 router = LLMRouter(composite, middleware=[MyMiddleware()])
 ```
@@ -471,10 +490,12 @@ router = LLMRouter(composite, middleware=[MyMiddleware()])
 ```python
 from llmrouterx.retry import BaseRetry
 
+
 class MyRetry(BaseRetry):
     async def should_retry(self, error, attempt):
         # Your logic to decide if we should retry
         return attempt < 3
+
 
 router = LLMRouter(composite, retry=MyRetry())
 ```
@@ -505,6 +526,7 @@ from llmrouterx import LLMRouter
 from llmrouterx.providers import StubClient, ProviderRouter, CompositeRouter
 from llmrouterx.client import ClientNode
 
+
 @pytest.mark.asyncio
 async def test_basic_chat():
     stub = StubClient("test")
@@ -512,7 +534,7 @@ async def test_basic_chat():
     provider = ProviderRouter("test", [node])
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello")
     assert response is not None
 ```
@@ -539,10 +561,12 @@ from llmrouterx import LLMRouter
 from llmrouterx.retry import ExponentialRetry
 from llmrouterx.middleware import BaseMiddleware
 
+
 class LogMiddleware(BaseMiddleware):
     async def before_request(self, op, payload):
         print(f"Sending: {op}")
         return payload
+
 
 retry = ExponentialRetry(max_retries=5, base=1.0, factor=2.0)
 

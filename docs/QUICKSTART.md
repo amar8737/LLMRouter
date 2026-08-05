@@ -29,15 +29,17 @@ from llmrouter import LLMRouter
 from llmrouter.client import ClientNode
 from llmrouter.providers import ProviderRouter, CompositeRouter
 
+
 async def main():
     client = AsyncOpenAI(api_key="sk-...")
     node = ClientNode("sk-...", client)
     provider = ProviderRouter("openai", [node])
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -54,20 +56,22 @@ from llmrouter.client import ClientNode
 from llmrouter.providers import ProviderRouter, CompositeRouter
 from llmrouter.scheduler import LeastBusyScheduler
 
+
 async def main():
     keys = ["sk-key1", "sk-key2", "sk-key3"]
     nodes = [ClientNode(key, AsyncOpenAI(api_key=key)) for key in keys]
-    
+
     provider = ProviderRouter(
         "openai",
         nodes,
-        scheduler=LeastBusyScheduler()  # Rotate across keys
+        scheduler=LeastBusyScheduler(),  # Rotate across keys
     )
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -85,21 +89,23 @@ from llmrouter.client import ClientNode
 from llmrouter.providers import ProviderRouter, CompositeRouter
 from llmrouter.scheduler import LeastBusyScheduler
 
+
 async def main():
     # OpenAI (primary)
     openai_node = ClientNode("sk-...", AsyncOpenAI(api_key="sk-..."))
     openai_provider = ProviderRouter("openai", [openai_node], scheduler=LeastBusyScheduler())
-    
+
     # Groq (fallback)
     groq_node = ClientNode("gsk-...", AsyncGroq(api_key="gsk-..."))
     groq_provider = ProviderRouter("groq", [groq_node], scheduler=LeastBusyScheduler())
-    
+
     # Try OpenAI first, fall back to Groq
     composite = CompositeRouter([openai_provider, groq_provider])
     router = LLMRouter(composite)
-    
+
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -112,16 +118,16 @@ asyncio.run(main())
 import asyncio
 from llmrouter import LLMRouter
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     # Make 10 concurrent requests
     prompts = [f"Request {i}" for i in range(10)]
-    responses = await asyncio.gather(*[
-        router.chat(prompt=p) for p in prompts
-    ])
-    
+    responses = await asyncio.gather(*[router.chat(prompt=p) for p in prompts])
+
     print(f"Got {len(responses)} responses")
+
 
 asyncio.run(main())
 ```
@@ -133,6 +139,7 @@ asyncio.run(main())
 ```python
 from llmrouter.scheduler import BaseScheduler
 
+
 class PriorityScheduler(BaseScheduler):
     async def select(self, provider_router):
         candidates = [c for c in provider_router.clients if await c.is_healthy()]
@@ -140,6 +147,7 @@ class PriorityScheduler(BaseScheduler):
             return None
         candidates.sort(key=lambda c: getattr(c, "priority", 0), reverse=True)
         return candidates[0]
+
 
 # Use it
 premium_node = ClientNode("premium-key", client)
@@ -149,9 +157,7 @@ standard_node = ClientNode("standard-key", client)
 standard_node.priority = 10
 
 provider = ProviderRouter(
-    "prioritized",
-    [premium_node, standard_node],
-    scheduler=PriorityScheduler()
+    "prioritized", [premium_node, standard_node], scheduler=PriorityScheduler()
 )
 ```
 
@@ -167,14 +173,16 @@ from llmrouter import LLMRouter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class LoggingMiddleware(BaseMiddleware):
     async def before_request(self, op, payload):
         logger.info(f"→ {op}: {payload}")
         return payload
-    
+
     async def after_response(self, op, payload, response):
         logger.info(f"← {op}: {response}")
         return response
+
 
 router = LLMRouter(composite, middleware=[LoggingMiddleware()])
 ```
@@ -189,10 +197,10 @@ from llmrouter import LLMRouter
 
 # Retry with exponential backoff
 retry = ExponentialRetry(
-    max_retries=5,       # Try 5 times
-    base=0.5,            # Start with 0.5 second wait
-    factor=2.0,          # Double each time
-    max_backoff=30.0     # Cap at 30 seconds
+    max_retries=5,  # Try 5 times
+    base=0.5,  # Start with 0.5 second wait
+    factor=2.0,  # Double each time
+    max_backoff=30.0,  # Cap at 30 seconds
 )
 
 router = LLMRouter(composite, retry=retry)
@@ -206,17 +214,19 @@ router = LLMRouter(composite, retry=retry)
 import asyncio
 from llmrouter import LLMRouter
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     # Make some requests
     await router.chat(prompt="Request 1")
     await router.chat(prompt="Request 2")
-    
+
     # View metrics
     metrics = router.metrics.get()
     print("Counters:", metrics["counters"])
     print("Timings:", metrics["timings"])
+
 
 asyncio.run(main())
 ```
@@ -230,15 +240,17 @@ import asyncio
 from llmrouter import LLMRouter
 from llmrouter.exceptions import NoHealthyClientError
 
+
 async def main():
     router = LLMRouter(composite)
-    
+
     try:
         response = await router.chat(prompt="Hello!")
     except NoHealthyClientError as e:
         print(f"All providers are down: {e}")
     except Exception as e:
         print(f"Request failed: {e}")
+
 
 asyncio.run(main())
 ```
@@ -249,18 +261,18 @@ asyncio.run(main())
 
 ```python
 from llmrouter.scheduler import (
-    LeastBusyScheduler,      # Pick client with fewest active requests
-    RoundRobinScheduler,     # Rotate through clients
-    RandomScheduler,         # Pick random client
-    WeightedScheduler,       # Pick by weight (node.weight)
-    PriorityScheduler,       # Pick by priority (node.priority)
+    LeastBusyScheduler,  # Pick client with fewest active requests
+    RoundRobinScheduler,  # Rotate through clients
+    RandomScheduler,  # Pick random client
+    WeightedScheduler,  # Pick by weight (node.weight)
+    PriorityScheduler,  # Pick by priority (node.priority)
 )
 
 # Use it
 provider = ProviderRouter(
     "name",
     clients,
-    scheduler=LeastBusyScheduler()  # or any scheduler above
+    scheduler=LeastBusyScheduler(),  # or any scheduler above
 )
 ```
 

@@ -1,0 +1,1536 @@
+==> ./tests/test_schedulers.py <==
+import asyncio
+
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.scheduler.least_busy import LeastBusyScheduler
+from llmrouterx.scheduler.priority import PriorityScheduler
+from llmrouterx.scheduler.random import RandomScheduler
+from llmrouterx.scheduler.round_robin import RoundRobinScheduler
+from llmrouterx.scheduler.weighted import WeightedScheduler
+
+
+class SimpleNode(ClientNode):
+    def __init__(self, api_key, client, healthy=True, active=0, weight=1, priority=100):
+        super().__init__(api_key, client)
+        self._healthy = healthy
+        self.active_requests = active
+        self.weight = weight
+        self.priority = priority
+
+    async def is_healthy(self):
+        return self._healthy
+
+
+def test_round_robin_rotates():
+    client = StubClient("a")
+    nodes = [SimpleNode(f"k{i}", client) for i in range(3)]
+    provider = ProviderRouter("prov", nodes, scheduler=None)
+    rr = RoundRobinScheduler()
+
+    async def run():
+        picks = []
+        for _ in range(6):
+            n = await rr.select(provider)
+            picks.append(n.api_key)
+        return picks
+
+    picks = asyncio.run(run())
+    assert picks == ["k0", "k1", "k2", "k0", "k1", "k2"]
+
+
+def test_least_busy_selects_least_active():
+    client = StubClient("b")
+    nodes = [SimpleNode("k0", client, active=5), SimpleNode("k1", client, active=1), SimpleNode("k2", client, active=3)]
+    provider = ProviderRouter("prov2", nodes)
+    ls = LeastBusyScheduler()
+
+    chosen = asyncio.run(ls.select(provider))
+    assert chosen.api_key == "k1"
+
+
+def test_random_selects_healthy():
+    client = StubClient("c")
+    nodes = [
+        SimpleNode("k0", client, healthy=False),
+        SimpleNode("k1", client, healthy=True),
+        SimpleNode("k2", client, healthy=True),
+    ]
+    provider = ProviderRouter("prov3", nodes)
+    rs = RandomScheduler()
+    picks = set()
+    for _ in range(20):
+        n = asyncio.run(rs.select(provider))
+        picks.add(n.api_key)
+    assert picks <= {"k1", "k2"}
+    assert len(picks) >= 1
+
+
+def test_weighted_scheduler_distribution():
+    client = StubClient("d")
+    nodes = [SimpleNode("k0", client, weight=1), SimpleNode("k1", client, weight=9)]
+    provider = ProviderRouter("prov4", nodes)
+    ws = WeightedScheduler()
+
+    counts = {"k0": 0, "k1": 0}
+    # sample many times to get approximate distribution
+    for _ in range(500):
+        n = asyncio.run(ws.select(provider))
+        counts[n.api_key] += 1
+
+    # k1 should be chosen much more often than k0
+    assert counts["k1"] > counts["k0"] * 3
+
+
+def test_priority_scheduler_prefers_high_priority():
+    client = StubClient("e")
+    nodes = [SimpleNode("low", client, priority=50), SimpleNode("high", client, priority=1)]
+    provider = ProviderRouter("prov5", nodes)
+    ps = PriorityScheduler()
+    chosen = asyncio.run(ps.select(provider))
+    assert chosen.api_key == "high"
+
+==> ./tests/test_streaming.py <==
+import time
+
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.router.streaming import StreamingLLMRouter
+
+
+def test_async_streaming_and_callback():
+    stub = StubClient("s1")
+    node = ClientNode("k1", stub)
+    provider = ProviderRouter("p1", [node])
+    composite = CompositeRouter([provider])
+    router = StreamingLLMRouter(composite)
+
+    received = []
+
+    async def run():
+        async for token in router.stream("hello world"):
+            received.append(token)
+
+    import asyncio
+    asyncio.run(run())
+
+    assert len(received) > 0
+
+
+def test_streaming_callback_on_chunk_and_sync():
+    stub = StubClient("s2")
+    node = ClientNode("k2", stub)
+    provider = ProviderRouter("p2", [node])
+    composite = CompositeRouter([provider])
+    router = StreamingLLMRouter(composite)
+
+    cb_received = []
+
+    def on_chunk(t):
+        cb_received.append(t)
+
+    # sync streaming (runs async path under the hood)
+    out = ""
+    for tok in router.stream_sync("stream me", on_chunk=on_chunk):
+        out += tok
+
+    assert len(cb_received) > 0
+    assert len(out) > 0
+
+==> ./tests/test_extended_streaming.py <==
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
+
+
+def test_chat_sync_and_stream_sync_complete():
+    stub = StubClient("stub")
+    router = ExtendedStreamingLLMRouter({"stub": {"client": stub}})
+
+    # sync full response
+    resp = router.chat_sync("hello sync")
+    assert "Echo from stub" in resp
+
+    # sync stream complete
+    out = router.chat_stream_sync_complete("stream me", print_output=False)
+    assert len(out) > 0
+
+==> ./tests/run_tests.py <==
+import asyncio
+
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.metrics.metrics import MetricsCollector
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.retry.exponential import ExponentialRetry
+from llmrouterx.router.llmrouter import LLMRouter
+from llmrouterx.scheduler.round_robin import RoundRobinScheduler
+
+
+async def main():
+    client = StubClient("stub1")
+    node = ClientNode("key1", client)
+    scheduler = RoundRobinScheduler()
+    provider = ProviderRouter("stub_provider", [node], scheduler=scheduler)
+    composite = CompositeRouter([provider])
+    retry = ExponentialRetry(max_retries=2)
+    metrics = MetricsCollector()
+    router = LLMRouter(composite, retry=retry, metrics=metrics)
+
+    resp = await router.chat("hello world")
+    print("Response:", resp)
+    print("Metrics:", metrics.get())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+==> ./tests/test_cancellation.py <==
+import asyncio
+
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.router.llmrouter import LLMRouter
+
+
+class SlowClient:
+    def __init__(self, delay=1.0):
+        self.delay = delay
+
+    async def request(self, op, payload, api_key=None, **kwargs):
+        # simulate long-running provider call
+        await asyncio.sleep(self.delay)
+        return {"response": "done"}
+
+
+def test_cancellation_propagates_to_client():
+    client = SlowClient(delay=2.0)
+    node = ClientNode("k", client, max_concurrent=1)
+    provider = ProviderRouter("p", [node])
+    composite = CompositeRouter([provider])
+    router = LLMRouter(composite)
+
+    async def run_and_cancel():
+        task = asyncio.create_task(router.chat("hello"))
+        # let it start and enter client.send
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # ensure that active_requests is decremented and failures not incremented
+        assert node.active_requests == 0
+        assert node.failures == 0
+
+    asyncio.run(run_and_cancel())
+
+==> ./tests/test_provider_streaming.py <==
+import asyncio
+
+from llmrouterx.providers.stub_provider import StubStreamingClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
+
+
+def test_stub_streaming_async_and_sync():
+    client = StubStreamingClient(name="stest", chunks=["A", "B", "C"], delay=0.001)
+    router = ExtendedStreamingLLMRouter({"stest": {"client": client}})
+
+    # async stream
+    tokens = []
+
+    async def run_async():
+        async for t in router.chat_stream("hi"):
+            tokens.append(t)
+
+    asyncio.run(run_async())
+    assert len(tokens) == 3
+    assert "".join(tokens) == "ABC"
+
+    # sync stream complete
+    full = router.chat_stream_sync_complete("hi")
+    assert full == "ABC"
+
+==> ./tests/__init__.py <==
+
+==> ./tests/test_retry_failover_metrics.py <==
+import asyncio
+import time
+
+import pytest
+
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.router.llmrouter import LLMRouter
+from llmrouterx.metrics.metrics import MetricsCollector
+from llmrouterx.retry.exponential import ExponentialRetry, HTTPError
+
+
+@pytest.mark.asyncio
+async def test_success_records_metrics():
+    metrics = MetricsCollector()
+    stub = StubClient("s1")
+    node = ClientNode("k1", stub)
+    provider = ProviderRouter("p1", [node])
+    composite = CompositeRouter([provider], metrics=metrics)
+    router = LLMRouter(composite, metrics=metrics)
+
+    resp = await router.chat("hello")
+    assert resp["provider"] == "s1"
+
+    data = metrics.get()
+    assert data["counters"].get("requests.chat", 0) >= 1
+    assert "latency.chat" in data["timings"]
+
+
+class FlakyClient:
+    def __init__(self, fail_times=1):
+        self._calls = 0
+        self.fail_times = fail_times
+
+    async def request(self, op, payload, api_key=None, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise RuntimeError("boom")
+        return {"provider": "flaky", "op": op, "response": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_failover_to_next_provider_records_metrics():
+    metrics = MetricsCollector()
+    # first provider will error on request
+    flaky = FlakyClient(fail_times=1)
+    node_bad = ClientNode("bad", flaky)
+    p_bad = ProviderRouter("bad", [node_bad])
+
+    # second provider succeeds
+    stub = StubClient("succeed")
+    node_ok = ClientNode("ok", stub)
+    p_ok = ProviderRouter("ok", [node_ok])
+
+    composite = CompositeRouter([p_bad, p_ok], metrics=metrics)
+    router = LLMRouter(composite, metrics=metrics, retry=ExponentialRetry(max_retries=2))
+
+    resp = await router.chat("hi")
+    assert resp["provider"] == "succeed"
+
+    data = metrics.get()
+    # ensure provider error and success metrics recorded
+    assert data["counters"].get("provider.error.bad", 0) >= 0
+    assert data["counters"].get("provider.success.ok", 0) >= 1
+
+
+class RetryAfterClient:
+    def __init__(self, fail_times=2):
+        self._calls = 0
+        self.fail_times = fail_times
+
+    async def request(self, op, payload, api_key=None, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            # simulate HTTP 429 with Retry-After header
+            raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
+        return {"provider": "retry", "op": op, "response": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_retry_honors_retry_after_and_succeeds():
+    metrics = MetricsCollector()
+    client = RetryAfterClient(fail_times=2)
+    node = ClientNode("r1", client)
+    provider = ProviderRouter("rprov", [node])
+    composite = CompositeRouter([provider], metrics=metrics)
+
+    # allow up to 3 retries so client can succeed on 3rd call
+    retry = ExponentialRetry(max_retries=4, base=0.01)
+    router = LLMRouter(composite, metrics=metrics, retry=retry)
+
+    start = time.monotonic()
+    resp = await router.chat("retry-me")
+    elapsed = time.monotonic() - start
+    assert resp["provider"] == "retry"
+
+    # Because Retry-After was 0.05 and called twice, elapsed should be >= 0.1
+    assert elapsed >= 0.09
+
+==> ./tests/test_extended_streaming_stop_event.py <==
+import threading
+
+from llmrouterx.providers.stub_provider import StubStreamingClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
+
+
+def test_chat_stream_sync_with_stop_event():
+    provider = StubStreamingClient(chunks=["A", "B", "C", "D", "E"], delay=0.05)
+    router = ExtendedStreamingLLMRouter({"p": {"client": provider}})
+
+    stop_event = threading.Event()
+
+    gen = router.chat_stream_sync("hello", stop_event=stop_event)
+
+    tokens = []
+
+    # consume first token then signal stop
+    tokens.append(next(gen))
+    stop_event.set()
+    # collect remaining from iterator; it should finish quickly
+    for t in gen:
+        tokens.append(t)
+
+    # ensure we received at least 1 token and didn't hang
+    assert len(tokens) >= 1
+
+==> ./llmrouterx/middleware/base.py <==
+class BaseMiddleware:
+    async def before_request(self, op: str, payload: dict):
+        return payload
+
+    async def after_response(self, op: str, payload: dict, response: dict):
+        return response
+
+==> ./llmrouterx/retry/exponential.py <==
+import asyncio
+import time
+from typing import Dict, Optional
+
+
+class HTTPError(Exception):
+    def __init__(self, status_code: int, message: str = "HTTP error", headers: Optional[Dict] = None):
+        super().__init__(f"{status_code}: {message}")
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class ExponentialRetry:
+    def __init__(self, max_retries: int = 3, base: float = 0.5, factor: float = 2.0, max_backoff: float = 60.0):
+        self.max_retries = max_retries
+        self.base = base
+        self.factor = factor
+        self.max_backoff = max_backoff
+
+    def should_retry(self, exc: Exception, attempt: int) -> bool:
+        if attempt >= self.max_retries:
+            return False
+
+        # HTTP retryable status codes
+        if isinstance(exc, HTTPError):
+            return exc.status_code in (429, 500, 502, 503, 504)
+
+        # Network/timeouts
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+
+        return False
+
+    def get_backoff(self, exc: Exception, attempt: int) -> float:
+        # If HTTP 429 and Retry-After header present, honor it
+        if isinstance(exc, HTTPError) and exc.status_code == 429:
+            retry_after = exc.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    return min(float(retry_after), self.max_backoff)
+                except Exception:
+                    pass
+
+        # jitterless exponential backoff (attempt is 1-based)
+        backoff = self.base * (self.factor ** (attempt - 1))
+        return min(backoff, self.max_backoff)
+
+    async def wait(self, exc: Exception, attempt: int):
+        await asyncio.sleep(self.get_backoff(exc, attempt))
+
+==> ./llmrouterx/config/config.py <==
+from dataclasses import dataclass, field
+from typing import List, Optional, Any
+import os
+
+
+@dataclass
+class RouterConfig:
+    providers: List[Any] = field(default_factory=list)
+    scheduler: Optional[Any] = None
+    retry: Optional[Any] = None
+    middleware: List[Any] = field(default_factory=list)
+    timeout: int = 60
+    max_retries: int = 3
+    max_concurrent_per_key: int = 100
+
+    @classmethod
+    def from_env(cls) -> "RouterConfig":
+        return cls(
+            providers=[],
+            timeout=int(os.getenv("LLMROUTER_TIMEOUT", "60")),
+            max_retries=int(os.getenv("LLMROUTER_MAX_RETRIES", "3")),
+            max_concurrent_per_key=int(os.getenv("LLMROUTER_MAX_CONCURRENT", "100")),
+        )
+
+    def validate(self):
+        if not self.providers:
+            raise ValueError("RouterConfig: at least one provider must be configured")
+        if self.timeout <= 0:
+            raise ValueError("RouterConfig.timeout must be positive")
+        if self.max_retries < 0:
+            raise ValueError("RouterConfig.max_retries must be non-negative")
+        if self.max_concurrent_per_key <= 0:
+            raise ValueError("RouterConfig.max_concurrent_per_key must be positive")
+
+==> ./llmrouterx/providers/composite_router.py <==
+import logging
+from ..exceptions import NoHealthyClientError
+
+
+class CompositeRouter:
+    """Routes between multiple ProviderRouter instances.
+
+    Strategy: try providers in order and avoid TOCTOU by invoking `handle`
+    directly and catching provider-level errors.
+    """
+
+    def __init__(self, providers: list, metrics=None):
+        self.providers = providers or []
+        self.metrics = metrics
+
+    async def handle(self, op: str, payload: dict, **kwargs):
+        last_exc = None
+        for provider in self.providers:
+            provider_name = getattr(provider, "name", "unknown")
+            try:
+                result = await provider.handle(op, payload, **kwargs)
+                if self.metrics:
+                    self.metrics.incr(f"provider.success.{provider_name}")
+                return result
+            except NoHealthyClientError as e:
+                logging.debug("provider %s has no healthy clients: %s", provider_name, e)
+                last_exc = e
+                if self.metrics:
+                    self.metrics.incr(f"provider.no_healthy.{provider_name}")
+                continue
+            except Exception as e:
+                # Propagate cancellation immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                logging.exception("provider %s failed: %s", provider_name, e)
+                last_exc = e
+                if self.metrics:
+                    self.metrics.incr(f"provider.error.{provider_name}")
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("No healthy providers available")
+
+==> ./llmrouterx/providers/__init__.py <==
+from .provider_router import ProviderRouter
+from .composite_router import CompositeRouter
+from .stub_provider import StubClient, StubStreamingClient
+
+__all__ = ["ProviderRouter", "CompositeRouter", "StubClient", "StubStreamingClient"]
+
+==> ./llmrouterx/providers/provider_router.py <==
+import logging
+
+from ..exceptions import NoHealthyClientError
+
+
+class ProviderRouter:
+    """Manages a single provider and its ClientNode instances."""
+
+    def __init__(self, name: str, clients: list, scheduler=None):
+        self.name = name
+        self.clients = clients or []
+        self.scheduler = scheduler
+
+    async def is_healthy(self) -> bool:
+        for c in self.clients:
+            try:
+                if await c.is_healthy():
+                    return True
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("client health check failed for %s: %s", getattr(c, "api_key", "<client>"), e)
+                continue
+        return False
+
+    async def handle(self, op: str, *args, **kwargs):
+        # Use attached scheduler if available
+        if self.scheduler is not None:
+            client = await self.scheduler.select(self)
+            if client:
+                return await client.send(op, *args, **kwargs)
+            raise NoHealthyClientError(f"No healthy clients for provider {self.name}")
+
+        # Fallback simple scheduler: pick first healthy client
+        for c in self.clients:
+            try:
+                if await c.is_healthy():
+                    return await c.send(op, *args, **kwargs)
+            except Exception as e:
+                # Propagate cancellation immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                # otherwise log and continue to next client
+                continue
+        raise NoHealthyClientError(f"No healthy clients for provider {self.name}")
+
+==> ./llmrouterx/providers/stub_provider.py <==
+from typing import Optional
+import asyncio
+
+
+class StubClient:
+    """A tiny in-process provider client used for testing and examples."""
+
+    def __init__(self, name: str = "stub"):
+        self.name = name
+
+    async def request(self, op: str, payload: dict, api_key: Optional[str] = None, **kwargs):
+        await asyncio.sleep(0)
+        # payload may include prompt or text etc.
+        body = payload.get("prompt") or payload.get("text") or payload.get("args")
+        return {
+            "provider": self.name,
+            "api_key": api_key,
+            "op": op,
+            "response": f"Echo from {self.name}: {body}",
+        }
+
+
+class StubStreamingClient:
+    """A stub client that can stream chunks asynchronously or return a full response.
+
+    Use `request(..., stream=True)` to get an async iterator of chunk dicts
+    with a `response` field. For non-streaming calls `request(..., stream=False)`
+    returns an awaitable coroutine producing the full response dict.
+    """
+
+    def __init__(self, name: str = "stub-stream", chunks: Optional[list] = None, delay: float = 0.01):
+        self.name = name
+        self.chunks = chunks or ["Hello", " world", " from", " stub"]
+        self.delay = delay
+
+    def request(self, op: str, payload: dict, api_key: Optional[str] = None, stream: bool = False, **kwargs):
+        if stream:
+            async def gen():
+                for part in self.chunks:
+                    await asyncio.sleep(self.delay)
+                    yield {"provider": self.name, "api_key": api_key, "op": op, "response": part}
+
+            return gen()
+
+        async def full():
+            await asyncio.sleep(0)
+            return {"provider": self.name, "api_key": api_key, "op": op, "response": "".join(self.chunks)}
+
+        return full()
+
+==> ./llmrouterx/exceptions/__init__.py <==
+class RouterError(Exception):
+    pass
+
+
+class ProviderError(RouterError):
+    pass
+
+
+class RetryError(RouterError):
+    pass
+
+
+class SchedulerError(RouterError):
+    pass
+
+
+class NoHealthyClientError(ProviderError):
+    pass
+
+
+class ConfigurationError(RouterError):
+    pass
+
+
+class AuthenticationError(RouterError):
+    pass
+
+==> ./llmrouterx/scheduler/least_busy.py <==
+from .base import BaseScheduler
+import asyncio
+
+
+class LeastBusyScheduler(BaseScheduler):
+    def __init__(self):
+        self._lock = asyncio.Lock()
+
+    async def select(self, provider_router):
+        async with self._lock:
+            candidates = [c for c in provider_router.clients if await c.is_healthy()]
+            if not candidates:
+                return None
+            # choose client with fewest active requests (snapshot under lock)
+            candidates.sort(key=lambda c: getattr(c, "active_requests", 0))
+            return candidates[0]
+
+==> ./llmrouterx/scheduler/base.py <==
+from abc import ABC, abstractmethod
+
+
+class BaseScheduler(ABC):
+    @abstractmethod
+    async def select(self, provider_router):
+        """Return a ClientNode or None"""
+
+==> ./llmrouterx/scheduler/priority.py <==
+import logging
+
+from .base import BaseScheduler
+
+
+class PriorityScheduler(BaseScheduler):
+    """Select the healthiest client with the highest priority.
+
+    Clients may expose a `priority` attribute (lower number == higher priority).
+    Among equal priority, choose the least-busy client.
+    """
+
+    async def select(self, provider_router):
+        clients = provider_router.clients
+        if not clients:
+            return None
+        candidates = []
+        for c in clients:
+            try:
+                if await c.is_healthy():
+                    pr = getattr(c, "priority", 100)
+                    candidates.append((pr, c))
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("skipping client in priority scheduler due to error: %s", e)
+                continue
+        if not candidates:
+            return None
+        # sort by priority asc, then by active_requests asc
+        candidates.sort(key=lambda pc: (pc[0], getattr(pc[1], "active_requests", 0)))
+        return candidates[0][1]
+
+==> ./llmrouterx/scheduler/round_robin.py <==
+import logging
+import asyncio
+
+from .base import BaseScheduler
+
+
+class RoundRobinScheduler(BaseScheduler):
+    def __init__(self):
+        self._indices = {}
+        self._locks = {}
+
+    async def select(self, provider_router):
+        clients = provider_router.clients
+        if not clients:
+            return None
+        # Use provider name if present, otherwise use object id to key rotation state
+        key = getattr(provider_router, "name", None) or f"id:{id(provider_router)}"
+        # ensure there's a lock per provider
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            idx = self._indices.get(key, 0) % len(clients)
+            for i in range(len(clients)):
+                c = clients[(idx + i) % len(clients)]
+                try:
+                    healthy = await c.is_healthy()
+                except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                    logging.debug("round-robin: client health check failed: %s", e)
+                    healthy = False
+                if healthy:
+                    self._indices[key] = (idx + i + 1) % len(clients)
+                    return c
+        return None
+
+==> ./llmrouterx/scheduler/random.py <==
+import random
+
+from .base import BaseScheduler
+
+
+class RandomScheduler(BaseScheduler):
+    async def select(self, provider_router):
+        healthy = [c for c in provider_router.clients if await c.is_healthy()]
+        if not healthy:
+            return None
+        return random.choice(healthy)
+
+==> ./llmrouterx/scheduler/__init__.py <==
+from .base import BaseScheduler
+from .least_busy import LeastBusyScheduler
+from .round_robin import RoundRobinScheduler
+from .random import RandomScheduler
+from .weighted import WeightedScheduler
+from .priority import PriorityScheduler
+
+__all__ = [
+    "BaseScheduler",
+    "LeastBusyScheduler",
+    "RoundRobinScheduler",
+    "RandomScheduler",
+    "WeightedScheduler",
+    "PriorityScheduler",
+]
+
+==> ./llmrouterx/scheduler/weighted.py <==
+import random
+
+import logging
+
+from .base import BaseScheduler
+
+
+class WeightedScheduler(BaseScheduler):
+    """Choose a healthy client randomly weighted by `weight` attribute (default 1)."""
+
+    async def select(self, provider_router):
+        clients = provider_router.clients
+        if not clients:
+            return None
+        weighted = []
+        for c in clients:
+            try:
+                if await c.is_healthy():
+                    w = getattr(c, "weight", 1) or 1
+                    weighted.append((c, float(w)))
+            except (AttributeError, RuntimeError, OSError, TypeError) as e:
+                logging.debug("weighted scheduler: skipping client due to error: %s", e)
+                continue
+        if not weighted:
+            return None
+        total = sum(w for _, w in weighted)
+        r = random.random() * total
+        upto = 0.0
+        for c, w in weighted:
+            upto += w
+            if r <= upto:
+                return c
+        return weighted[-1][0]
+
+==> ./llmrouterx/utils/cancellation.py <==
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Iterable
+
+
+async def cancel_and_wait(task: asyncio.Task, timeout: float = 5.0):
+    """Cancel a task and wait up to `timeout` seconds for it to finish.
+
+    Silently swallow `CancelledError` and `TimeoutError` so callers can
+    continue cleanup.
+    """
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        pass
+
+
+async def cancel_tasks_and_wait(tasks: Iterable[asyncio.Task], timeout: float = 5.0):
+    await asyncio.gather(*(cancel_and_wait(t, timeout=timeout) for t in tasks))
+
+
+@asynccontextmanager
+async def background_task(coro):
+    """Run `coro` as a background task for the context lifetime and ensure
+    it's cancelled on exit.
+    """
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        await cancel_and_wait(task)
+
+==> ./llmrouterx/__init__.py <==
+"""LLMRouter package
+
+Expose the public router and package version.
+"""
+
+from .router.llmrouter import LLMRouter
+
+__version__ = "0.1.6"
+
+__all__ = ["LLMRouter", "__version__"]
+
+==> ./llmrouterx/client/client_node.py <==
+import asyncio
+from datetime import datetime, timedelta
+
+
+class ClientNode:
+    """Represents a single API key / client instance with basic health and concurrency control."""
+
+    FAILURE_THRESHOLD = 5
+    COOLDOWN_SECONDS = 30
+
+    def __init__(self, api_key: str, client, max_concurrent: int = 100):
+        self.api_key = api_key
+        self.client = client
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+        self.active_requests = 0
+        self.last_success = None
+        self.last_failure = None
+        self.failures = 0
+        self.cooldown_until = None
+
+    async def is_healthy(self) -> bool:
+        async with self._lock:
+            if self.cooldown_until and datetime.utcnow() < self.cooldown_until:
+                return False
+            return self.failures < self.FAILURE_THRESHOLD
+
+    async def _record_success(self):
+        async with self._lock:
+            self.last_success = datetime.utcnow()
+            # On success, fully recover failure count and clear cooldown so
+            # healthy clients rapidly return to service.
+            self.failures = 0
+            self.cooldown_until = None
+
+    async def _record_failure(self):
+        async with self._lock:
+            self.last_failure = datetime.utcnow()
+            self.failures += 1
+            if self.failures >= self.FAILURE_THRESHOLD:
+                self.cooldown_until = datetime.utcnow() + timedelta(seconds=self.COOLDOWN_SECONDS)
+
+    async def send(self, op: str, prompt: str, **kwargs):
+        # enforce max concurrent requests per key
+        async with self._semaphore:
+            async with self._lock:
+                self.active_requests += 1
+
+            try:
+                resp = await self.client.request(op, prompt, api_key=self.api_key, **kwargs)
+                await self._record_success()
+                return resp
+            except Exception as e:
+                # Do not treat cancellation as a failure metric — re-raise immediately
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                await self._record_failure()
+                raise
+            finally:
+                async with self._lock:
+                    self.active_requests = max(0, self.active_requests - 1)
+
+==> ./llmrouterx/client/__init__.py <==
+from .client_node import ClientNode
+
+__all__ = ["ClientNode"]
+
+==> ./llmrouterx/metrics/metrics.py <==
+
+import threading
+from collections import defaultdict
+from statistics import mean, median
+from typing import Dict, List
+
+
+class MetricsCollector:
+    """Thread-safe in-memory metrics collector for counters and timings."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.counters: Dict[str, int] = defaultdict(int)
+        self.timings: Dict[str, List[float]] = defaultdict(list)
+
+    def incr(self, key: str, amount: int = 1):
+        with self._lock:
+            self.counters[key] += amount
+
+    def timing(self, key: str, seconds: float):
+        with self._lock:
+            self.timings[key].append(seconds)
+
+    def get(self):
+        with self._lock:
+            # shallow copy to avoid exposing internal structures
+            return {"counters": dict(self.counters), "timings": {k: list(v) for k, v in self.timings.items()}}
+
+    def timing_stats(self, key: str):
+        with self._lock:
+            vals = list(self.timings.get(key, []))
+        if not vals:
+            return {}
+        vals.sort()
+        return {
+            "count": len(vals),
+            "min": vals[0],
+            "max": vals[-1],
+            "mean": mean(vals),
+            "median": median(vals),
+        }
+
+==> ./llmrouterx/router/llmrouter.py <==
+import asyncio
+import time
+
+from ..metrics.metrics import MetricsCollector
+from ..middleware.base import BaseMiddleware
+from ..providers.composite_router import CompositeRouter
+from ..providers.provider_router import ProviderRouter
+from ..client.client_node import ClientNode
+from ..config.config import RouterConfig
+from ..retry.exponential import ExponentialRetry
+
+
+class LLMRouter:
+    """Public router interface for applications.
+
+    Orchestrates middleware, retries, and metrics around the CompositeRouter.
+    """
+
+    def __init__(
+        self,
+        composite_router: CompositeRouter,
+        *,
+        retry: ExponentialRetry = None,
+        metrics: MetricsCollector = None,
+        middleware: list[BaseMiddleware] | None = None,
+        max_retries: int = 3,
+    ):
+        self._composite = composite_router
+        self.retry = retry or ExponentialRetry(max_retries=max_retries)
+        self.metrics = metrics or MetricsCollector()
+        self.middleware = middleware or []
+
+    async def _run_middlewares_before(self, op: str, payload: dict):
+        for m in self.middleware:
+            payload = await m.before_request(op, payload) or payload
+        return payload
+
+    async def _run_middlewares_after(self, op: str, payload: dict, response: dict):
+        for m in self.middleware:
+            response = await m.after_response(op, payload, response) or response
+        return response
+
+    async def _route_with_retry(self, op: str, payload: dict):
+        attempt = 0
+        start = time.monotonic()
+
+        # Run before-middlewares once to avoid side-effects across retries
+        payload = await self._run_middlewares_before(op, payload)
+
+        while True:
+            try:
+                resp = await self._composite.handle(op, payload)
+                resp = await self._run_middlewares_after(op, payload, resp)
+                elapsed = time.monotonic() - start
+                self.metrics.incr(f"requests.{op}")
+                self.metrics.timing(f"latency.{op}", elapsed)
+                return resp
+            except Exception as e:
+                # Immediately propagate cancellation
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                attempt += 1
+                self.metrics.incr(f"errors.{op}")
+                if self.retry.should_retry(e, attempt):
+                    backoff = self.retry.get_backoff(e, attempt)
+                    # record backoff in metrics
+                    try:
+                        self.metrics.timing(f"retry.backoff.{op}", backoff)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(backoff)
+                    continue
+                # exhausted or non-retryable
+                raise
+
+    async def chat(self, prompt: str, **kwargs):
+        payload = {"prompt": prompt, **kwargs}
+        return await self._route_with_retry("chat", payload)
+
+    async def embeddings(self, text: str, **kwargs):
+        payload = {"text": text, **kwargs}
+        return await self._route_with_retry("embeddings", payload)
+
+    async def responses(self, *args, **kwargs):
+        payload = {"args": args, **kwargs}
+        return await self._route_with_retry("responses", payload)
+
+    @classmethod
+    def from_config(cls, config: RouterConfig):
+        """Build an `LLMRouter` from a `RouterConfig` instance.
+
+        `config.providers` may contain already-built `ProviderRouter` objects
+        or dict-like provider descriptions of the form:
+
+        {"name": "openai", "clients": [{"api_key": "sk-..", "client": client_obj}, ...], "scheduler": scheduler}
+        """
+        providers = []
+        for p in config.providers:
+            if isinstance(p, ProviderRouter):
+                providers.append(p)
+                continue
+            # assume mapping-like
+            name = p.get("name") or p.get("provider")
+            raw_clients = p.get("clients", [])
+            scheduler = p.get("scheduler", config.scheduler)
+            clients = []
+            for rc in raw_clients:
+                api_key = rc.get("api_key") or rc.get("key")
+                client_obj = rc.get("client")
+                clients.append(ClientNode(api_key, client_obj, max_concurrent=config.max_concurrent_per_key))
+            providers.append(ProviderRouter(name, clients, scheduler=scheduler))
+
+        composite = CompositeRouter(providers)
+        return cls(composite, retry=config.retry, metrics=None, middleware=config.middleware, max_retries=config.max_retries)
+
+
+==> ./llmrouterx/router/streaming.py <==
+import asyncio
+from typing import Callable, Optional, AsyncGenerator
+
+from ..metrics.metrics import MetricsCollector
+from ..providers.composite_router import CompositeRouter
+
+
+def _default_tokenize(text: str):
+    # simple word-based tokenizer that keeps spaces
+    parts = text.split(" ")
+    for i, p in enumerate(parts):
+        if i + 1 < len(parts):
+            yield p + " "
+        else:
+            yield p
+
+
+class StreamingLLMRouter:
+    """Streaming router with three modes:
+    - async generator `stream()`
+    - sync iterator `stream_sync()` (wraps async behavior)
+    - callback via `on_chunk`
+
+    Note: Real provider-level streaming requires clients that expose streaming APIs.
+    This implementation will attempt to call a `stream` method on provider clients
+    when available; otherwise it falls back to tokenizing the full response.
+    """
+
+    def __init__(self, composite: CompositeRouter, *, metrics: MetricsCollector | None = None, tokenizer: Callable[[str], list] | None = None):
+        self._composite = composite
+        self.metrics = metrics or MetricsCollector()
+        self.tokenizer = tokenizer or _default_tokenize
+
+    async def _stream_from_text(self, text: str, on_chunk: Optional[Callable[[str], None]] = None) -> AsyncGenerator[str, None]:
+        for token in self.tokenizer(text):
+            if on_chunk:
+                try:
+                    on_chunk(token)
+                except Exception:
+                    pass
+            yield token
+
+    async def stream(self, prompt: str, on_chunk: Optional[Callable[[str], None]] = None, **kwargs) -> AsyncGenerator[str, None]:
+        """Async generator that yields tokens (strings).
+
+        If provider returns a streaming-capable response (not implemented by default),
+        it should be used; otherwise the full response is tokenized and streamed.
+        """
+        payload = {"prompt": prompt, **kwargs}
+        # get a single full response from composite (providers may support streaming in future)
+        result = await self._composite.handle("chat", payload)
+        text = None
+        if isinstance(result, dict):
+            text = result.get("response") or result.get("text") or str(result)
+        else:
+            text = str(result)
+
+        async for token in self._stream_from_text(text, on_chunk=on_chunk):
+            self.metrics.incr("stream.tokens")
+            yield token
+
+    async def stream_until_complete(self, prompt: str, on_chunk: Optional[Callable[[str], None]] = None, **kwargs) -> str:
+        """Collect tokens from `stream` and return the full concatenated response."""
+        out = []
+        async for token in self.stream(prompt, on_chunk=on_chunk, **kwargs):
+            out.append(token)
+        return "".join(out)
+
+    def stream_sync(self, prompt: str, on_chunk: Optional[Callable[[str], None]] = None, **kwargs):
+        """Synchronous iterator wrapper that runs the async stream to completion and yields tokens.
+
+        This is a best-effort shim for blocking code (CLI). It will run the async
+        path to completion and then yield tokens synchronously as they are produced
+        from the final response. It does not provide true incremental IO when the
+        provider does not support streaming.
+        """
+        text = asyncio.run(self.stream_until_complete(prompt, on_chunk=on_chunk, **kwargs))
+        for token in self.tokenizer(text):
+            if on_chunk:
+                try:
+                    on_chunk(token)
+                except Exception:
+                    pass
+            yield token
+
+    def stream_sync_until_complete(self, prompt: str, on_chunk: Optional[Callable[[str], None]] = None, **kwargs) -> str:
+        """Synchronous convenience: return concatenated response."""
+        return "".join(self.stream_sync(prompt, on_chunk=on_chunk, **kwargs))
+
+==> ./llmrouterx/router/extended_streaming.py <==
+import asyncio
+import inspect
+import queue
+import threading
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import asyncio
+
+from ..utils.cancellation import background_task
+
+
+class StreamMode(Enum):
+    NONE = "none"
+    ASYNC = "async"
+    SYNC = "sync"
+    CALLBACK = "callback"
+
+
+@dataclass
+class StreamConfig:
+    mode: StreamMode = StreamMode.ASYNC
+    buffer_size: int = 100
+    collect_full: bool = False
+    timeout: float = 60.0
+    retry_on_incomplete: bool = True
+
+
+def _default_tokenize(text: str):
+    parts = text.split(" ")
+    for i, p in enumerate(parts):
+        if i + 1 < len(parts):
+            yield p + " "
+        else:
+            yield p
+
+
+class ExtendedStreamingLLMRouter:
+    """Provider-agnostic extended router with async+sync methods and streaming.
+
+    This implementation uses provider clients from the `providers` mapping.
+    A provider client may expose an async `request(op, payload, **kwargs)` method
+    (as `StubClient` does) or provider-specific APIs. The router will call the
+    client's `request` method when present, awaiting if necessary.
+    """
+
+    def __init__(self, providers: Dict[str, Any], config: StreamConfig = None):
+        self.providers = providers
+        self.config = config or StreamConfig()
+        self.tokenizer = _default_tokenize
+
+    # ----------------- provider helpers -----------------
+    async def _maybe_await(self, value_or_coro):
+        if inspect.isawaitable(value_or_coro):
+            return await value_or_coro
+        return value_or_coro
+
+    def _select_provider(self) -> str:
+        return list(self.providers.keys())[0]
+
+    def _extract_text(self, result: Any) -> str:
+        if isinstance(result, dict):
+            return result.get("response") or result.get("text") or str(result)
+        return str(result)
+
+    # ----------------- ASYNC CHAT -----------------
+    async def chat(self, prompt: str, model: str = None, **kwargs) -> str:
+        provider = self._select_provider()
+        return await self._chat_with_provider(provider, prompt, model, **kwargs)
+
+    async def _chat_with_provider(self, provider: str, prompt: str, model: str = None, **kwargs) -> str:
+        cfg = self.providers.get(provider, {})
+        client = cfg.get("client")
+
+        # prefer a generic request API
+        if client and hasattr(client, "request"):
+            try:
+                res = client.request("chat", {"prompt": prompt}, **kwargs)
+                res = await self._maybe_await(res)
+                return self._extract_text(res)
+            except Exception:
+                # fallback to other provider-specific flows
+                pass
+
+        # provider-specific attempt: openai-like
+        if client and hasattr(client, "chat"):
+            # Try calling an async chat completion if available
+            try:
+                func = getattr(client.chat, "completions", None)
+                if func and hasattr(func, "create"):
+                    out = func.create(model=model or cfg.get("default_model"), messages=[{"role": "user", "content": prompt}], stream=False)
+                    out = await self._maybe_await(out)
+                    return self._extract_text(out)
+            except Exception:
+                pass
+
+        raise NotImplementedError("No supported chat method found for provider: %s" % provider)
+
+    # ----------------- ASYNC STREAMING -----------------
+    async def chat_stream(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, **kwargs) -> AsyncGenerator[str, None]:
+        provider = self._select_provider()
+        # attempt provider streaming paths
+        cfg = self.providers.get(provider, {})
+        client = cfg.get("client")
+
+        # If client exposes async request streaming (rare), try it
+        if client and hasattr(client, "request"):
+            # call and then fallback to full response tokenization
+            try:
+                res = client.request("chat", {"prompt": prompt}, stream=True, **kwargs)
+                res = await self._maybe_await(res)
+                # If res is an async iterator
+                if hasattr(res, "__aiter__"):
+                    q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+
+                    async def producer():
+                        try:
+                            async for chunk in res:
+                                await q.put(chunk)
+                        finally:
+                            await q.put(None)
+
+                    # run producer as a background task and ensure it's cancelled
+                    async with background_task(producer()):
+                        while True:
+                            chunk = await q.get()
+                            if chunk is None:
+                                break
+                            text = self._extract_text(chunk)
+                            for tok in self.tokenizer(text):
+                                if on_chunk:
+                                    maybe = on_chunk(tok)
+                                    if inspect.isawaitable(maybe):
+                                        await maybe
+                                yield tok
+                    return
+            except Exception:
+                pass
+
+        # Fallback: get full response then stream tokens
+        full = await self._chat_with_provider(provider, prompt, model, **kwargs)
+        for tok in self.tokenizer(full):
+            if on_chunk:
+                maybe = on_chunk(tok)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            yield tok
+
+    async def chat_stream_complete(self, prompt: str, model: str = None, print_output: bool = False, **kwargs) -> str:
+        out = ""
+        async for t in self.chat_stream(prompt, model, **kwargs):
+            out += t
+            if print_output:
+                print(t, end="", flush=True)
+        if print_output:
+            print()
+        return out
+
+    # ----------------- SYNC WRAPPERS -----------------
+    def chat_sync(self, prompt: str, model: str = None, **kwargs) -> str:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.chat(prompt, model, **kwargs))
+        finally:
+            loop.close()
+
+    def chat_stream_sync(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, **kwargs):
+        q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+        err = [None]
+
+        def producer():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            async def run():
+                try:
+                    async for tok in self.chat_stream(prompt, model, on_chunk=on_chunk, **kwargs):
+                        # allow cooperative cancellation via stop_event
+                        if stop_event and stop_event.is_set():
+                            break
+                        q.put(("token", tok))
+                    q.put(("done", None))
+                except Exception as e:
+                    err[0] = e
+                    q.put(("error", e))
+
+            task = loop.create_task(run())
+
+            # watcher to cancel the task from another thread if stop_event is set
+            def watcher():
+                if not stop_event:
+                    return
+                stop_event.wait()
+                if not task.done():
+                    loop.call_soon_threadsafe(task.cancel)
+
+            watch_thread = threading.Thread(target=watcher, daemon=True)
+            watch_thread.start()
+
+            try:
+                loop.run_until_complete(task)
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=producer, daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                typ, data = q.get()
+                if typ == "error":
+                    raise err[0]
+                if typ == "done":
+                    break
+                if typ == "token":
+                    yield data
+        finally:
+            thread.join(timeout=5)
+
+    def chat_stream_sync_complete(self, prompt: str, model: str = None, print_output: bool = False, **kwargs) -> str:
+        out = ""
+        for tok in self.chat_stream_sync(prompt, model, **kwargs):
+            out += tok
+            if print_output:
+                print(tok, end="", flush=True)
+        if print_output:
+            print()
+        return out
+
+    # ----------------- EMBEDDINGS -----------------
+    async def embeddings(self, text: str, model: str = None, **kwargs) -> List[float]:
+        provider = self._select_provider()
+        cfg = self.providers.get(provider, {})
+        client = cfg.get("client")
+
+        if client and hasattr(client, "embeddings"):
+            try:
+                call = client.embeddings.create(model=model or cfg.get("embedding_model"), input=text, **kwargs)
+                res = await self._maybe_await(call)
+                return res.data[0].embedding
+            except Exception:
+                pass
+
+        if client and hasattr(client, "request"):
+            res = client.request("embeddings", {"text": text}, **kwargs)
+            res = await self._maybe_await(res)
+            # Expect dict-like
+            return res.get("embedding") or res.get("data", [])[0].get("embedding")
+
+        raise NotImplementedError("Embeddings not implemented for provider")
+
+    def embeddings_sync(self, text: str, model: str = None, **kwargs) -> List[float]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.embeddings(text, model, **kwargs))
+        finally:
+            loop.close()
+
+    # ----------------- RESPONSES -----------------
+    async def responses(self, *args, model: str = None, **kwargs) -> Any:
+        provider = self._select_provider()
+        return await self._responses_with_provider(provider, args, model, **kwargs)
+
+    async def _responses_with_provider(self, provider: str, args: Tuple, model: str = None, **kwargs) -> Any:
+        cfg = self.providers.get(provider, {})
+        client = cfg.get("client")
+        if client and hasattr(client, "request"):
+            res = client.request("responses", {"args": args}, **kwargs)
+            res = await self._maybe_await(res)
+            return res
+        raise NotImplementedError("Responses not implemented for provider")
+
+    async def responses_stream(self, *args, model: str = None, on_chunk: Optional[Callable] = None, **kwargs) -> AsyncGenerator[str, None]:
+        provider = self._select_provider()
+        # fallback to full response tokenization
+        res = await self._responses_with_provider(provider, args, model, **kwargs)
+        text = self._extract_text(res)
+        for tok in self.tokenizer(text):
+            if on_chunk:
+                maybe = on_chunk(tok)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            yield tok
+
+    def responses_sync(self, *args, model: str = None, **kwargs) -> Any:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.responses(*args, model=model, **kwargs))
+        finally:
+            loop.close()
+
+    def responses_stream_sync(self, *args, model: str = None, on_chunk: Optional[Callable] = None, **kwargs):
+        stop_event: Optional[threading.Event] = kwargs.pop("stop_event", None)
+        q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+        err = [None]
+
+        def producer():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            async def run():
+                try:
+                    async for tok in self.responses_stream(*args, model=model, on_chunk=on_chunk, **kwargs):
+                        if stop_event and stop_event.is_set():
+                            break
+                        q.put(("token", tok))
+                    q.put(("done", None))
+                except Exception as e:
+                    err[0] = e
+                    q.put(("error", e))
+
+            task = loop.create_task(run())
+
+            def watcher():
+                if not stop_event:
+                    return
+                stop_event.wait()
+                if not task.done():
+                    loop.call_soon_threadsafe(task.cancel)
+
+            watch_thread = threading.Thread(target=watcher, daemon=True)
+            watch_thread.start()
+
+            try:
+                loop.run_until_complete(task)
+            finally:
+                loop.close()
+
+        thread = threading.Thread(target=producer, daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                typ, data = q.get()
+                if typ == "error":
+                    raise err[0]
+                if typ == "done":
+                    break
+                if typ == "token":
+                    yield data
+        finally:
+            thread.join(timeout=5)
+
+==> ./llmrouterx/router/__init__.py <==
+from .llmrouter import LLMRouter
+from .streaming import StreamingLLMRouter
+from .extended_streaming import ExtendedStreamingLLMRouter
+
+__all__ = ["LLMRouter", "StreamingLLMRouter", "ExtendedStreamingLLMRouter"]

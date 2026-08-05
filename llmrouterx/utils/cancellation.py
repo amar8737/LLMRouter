@@ -1,6 +1,6 @@
 import asyncio
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
-from typing import Iterable
 
 
 async def cancel_and_wait(task: asyncio.Task, timeout: float = 5.0):
@@ -16,7 +16,7 @@ async def cancel_and_wait(task: asyncio.Task, timeout: float = 5.0):
         await asyncio.wait_for(task, timeout=timeout)
     except asyncio.CancelledError:
         pass
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
 

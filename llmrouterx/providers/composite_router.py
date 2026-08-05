@@ -1,43 +1,104 @@
+from __future__ import annotations
+
+import asyncio
 import logging
+from typing import Any
+
 from ..exceptions import NoHealthyClientError
+
+logger = logging.getLogger(__name__)
 
 
 class CompositeRouter:
-    """Routes between multiple ProviderRouter instances.
+    """
+    Routes requests across multiple providers.
 
-    Strategy: try providers in order and avoid TOCTOU by invoking `handle`
-    directly and catching provider-level errors.
+    Strategy:
+        Provider 1
+            ↓
+        Provider 2
+            ↓
+        Provider 3
     """
 
-    def __init__(self, providers: list, metrics=None):
-        self.providers = providers or []
+    def __init__(
+        self,
+        providers: list[Any],
+        metrics: Any | None = None,
+    ) -> None:
+        self.providers = providers
         self.metrics = metrics
 
-    async def handle(self, op: str, payload: dict, **kwargs):
-        last_exc = None
+    async def handle(
+        self,
+        op: str,
+        payload: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+
+        last_exception: Exception | None = None
+
         for provider in self.providers:
-            provider_name = getattr(provider, "name", "unknown")
+
+            provider_name = getattr(
+                provider,
+                "name",
+                provider.__class__.__name__,
+            )
+
             try:
-                result = await provider.handle(op, payload, **kwargs)
+
+                response = await provider.handle(
+                    op,
+                    payload,
+                    **kwargs,
+                )
+
                 if self.metrics:
-                    self.metrics.incr(f"provider.success.{provider_name}")
-                return result
-            except NoHealthyClientError as e:
-                logging.debug("provider %s has no healthy clients: %s", provider_name, e)
-                last_exc = e
+                    self.metrics.incr(
+                        f"provider.success.{provider_name}"
+                    )
+
+                return response
+
+            except asyncio.CancelledError:
+                raise
+
+            except NoHealthyClientError as exc:
+
+                logger.debug(
+                    "Provider '%s' has no healthy clients.",
+                    provider_name,
+                )
+
+                last_exception = exc
+
                 if self.metrics:
-                    self.metrics.incr(f"provider.no_healthy.{provider_name}")
-                continue
-            except Exception as e:
-                # Propagate cancellation immediately
-                if isinstance(e, asyncio.CancelledError):
-                    raise
-                logging.exception("provider %s failed: %s", provider_name, e)
-                last_exc = e
-                if self.metrics:
-                    self.metrics.incr(f"provider.error.{provider_name}")
+                    self.metrics.incr(
+                        f"provider.no_healthy.{provider_name}"
+                    )
+
                 continue
 
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("No healthy providers available")
+            except Exception as exc:
+
+                logger.exception(
+                    "Provider '%s' failed.",
+                    provider_name,
+                )
+
+                last_exception = exc
+
+                if self.metrics:
+                    self.metrics.incr(
+                        f"provider.error.{provider_name}"
+                    )
+
+                continue
+
+        if last_exception is not None:
+            raise last_exception
+
+        raise RuntimeError(
+            "No providers configured."
+        )

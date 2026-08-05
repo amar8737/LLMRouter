@@ -2,10 +2,10 @@ import asyncio
 import inspect
 import queue
 import threading
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from enum import Enum
-import asyncio
+from typing import Any
 
 from ..utils.cancellation import background_task
 
@@ -44,7 +44,7 @@ class ExtendedStreamingLLMRouter:
     client's `request` method when present, awaiting if necessary.
     """
 
-    def __init__(self, providers: Dict[str, Any], config: StreamConfig = None):
+    def __init__(self, providers: dict[str, Any], config: StreamConfig = None):
         self.providers = providers
         self.config = config or StreamConfig()
         self.tokenizer = _default_tokenize
@@ -68,7 +68,9 @@ class ExtendedStreamingLLMRouter:
         provider = self._select_provider()
         return await self._chat_with_provider(provider, prompt, model, **kwargs)
 
-    async def _chat_with_provider(self, provider: str, prompt: str, model: str = None, **kwargs) -> str:
+    async def _chat_with_provider(
+        self, provider: str, prompt: str, model: str = None, **kwargs
+    ) -> str:
         cfg = self.providers.get(provider, {})
         client = cfg.get("client")
 
@@ -88,7 +90,11 @@ class ExtendedStreamingLLMRouter:
             try:
                 func = getattr(client.chat, "completions", None)
                 if func and hasattr(func, "create"):
-                    out = func.create(model=model or cfg.get("default_model"), messages=[{"role": "user", "content": prompt}], stream=False)
+                    out = func.create(
+                        model=model or cfg.get("default_model"),
+                        messages=[{"role": "user", "content": prompt}],
+                        stream=False,
+                    )
                     out = await self._maybe_await(out)
                     return self._extract_text(out)
             except Exception:
@@ -97,7 +103,9 @@ class ExtendedStreamingLLMRouter:
         raise NotImplementedError("No supported chat method found for provider: %s" % provider)
 
     # ----------------- ASYNC STREAMING -----------------
-    async def chat_stream(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, **kwargs) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self, prompt: str, model: str = None, on_chunk: Callable | None = None, **kwargs
+    ) -> AsyncGenerator[str, None]:
         provider = self._select_provider()
         # attempt provider streaming paths
         cfg = self.providers.get(provider, {})
@@ -111,7 +119,7 @@ class ExtendedStreamingLLMRouter:
                 res = await self._maybe_await(res)
                 # If res is an async iterator
                 if hasattr(res, "__aiter__"):
-                    q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+                    q: asyncio.Queue[str | None] = asyncio.Queue()
 
                     async def producer():
                         try:
@@ -146,7 +154,9 @@ class ExtendedStreamingLLMRouter:
                     await maybe
             yield tok
 
-    async def chat_stream_complete(self, prompt: str, model: str = None, print_output: bool = False, **kwargs) -> str:
+    async def chat_stream_complete(
+        self, prompt: str, model: str = None, print_output: bool = False, **kwargs
+    ) -> str:
         out = ""
         async for t in self.chat_stream(prompt, model, **kwargs):
             out += t
@@ -164,8 +174,15 @@ class ExtendedStreamingLLMRouter:
         finally:
             loop.close()
 
-    def chat_stream_sync(self, prompt: str, model: str = None, on_chunk: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, **kwargs):
-        q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+    def chat_stream_sync(
+        self,
+        prompt: str,
+        model: str = None,
+        on_chunk: Callable | None = None,
+        stop_event: threading.Event | None = None,
+        **kwargs,
+    ):
+        q: queue.Queue[tuple[str, str | None]] = queue.Queue()
         err = [None]
 
         def producer():
@@ -217,7 +234,9 @@ class ExtendedStreamingLLMRouter:
         finally:
             thread.join(timeout=5)
 
-    def chat_stream_sync_complete(self, prompt: str, model: str = None, print_output: bool = False, **kwargs) -> str:
+    def chat_stream_sync_complete(
+        self, prompt: str, model: str = None, print_output: bool = False, **kwargs
+    ) -> str:
         out = ""
         for tok in self.chat_stream_sync(prompt, model, **kwargs):
             out += tok
@@ -228,14 +247,16 @@ class ExtendedStreamingLLMRouter:
         return out
 
     # ----------------- EMBEDDINGS -----------------
-    async def embeddings(self, text: str, model: str = None, **kwargs) -> List[float]:
+    async def embeddings(self, text: str, model: str = None, **kwargs) -> list[float]:
         provider = self._select_provider()
         cfg = self.providers.get(provider, {})
         client = cfg.get("client")
 
         if client and hasattr(client, "embeddings"):
             try:
-                call = client.embeddings.create(model=model or cfg.get("embedding_model"), input=text, **kwargs)
+                call = client.embeddings.create(
+                    model=model or cfg.get("embedding_model"), input=text, **kwargs
+                )
                 res = await self._maybe_await(call)
                 return res.data[0].embedding
             except Exception:
@@ -249,7 +270,7 @@ class ExtendedStreamingLLMRouter:
 
         raise NotImplementedError("Embeddings not implemented for provider")
 
-    def embeddings_sync(self, text: str, model: str = None, **kwargs) -> List[float]:
+    def embeddings_sync(self, text: str, model: str = None, **kwargs) -> list[float]:
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(self.embeddings(text, model, **kwargs))
@@ -261,7 +282,9 @@ class ExtendedStreamingLLMRouter:
         provider = self._select_provider()
         return await self._responses_with_provider(provider, args, model, **kwargs)
 
-    async def _responses_with_provider(self, provider: str, args: Tuple, model: str = None, **kwargs) -> Any:
+    async def _responses_with_provider(
+        self, provider: str, args: tuple, model: str = None, **kwargs
+    ) -> Any:
         cfg = self.providers.get(provider, {})
         client = cfg.get("client")
         if client and hasattr(client, "request"):
@@ -270,7 +293,9 @@ class ExtendedStreamingLLMRouter:
             return res
         raise NotImplementedError("Responses not implemented for provider")
 
-    async def responses_stream(self, *args, model: str = None, on_chunk: Optional[Callable] = None, **kwargs) -> AsyncGenerator[str, None]:
+    async def responses_stream(
+        self, *args, model: str = None, on_chunk: Callable | None = None, **kwargs
+    ) -> AsyncGenerator[str, None]:
         provider = self._select_provider()
         # fallback to full response tokenization
         res = await self._responses_with_provider(provider, args, model, **kwargs)
@@ -289,9 +314,11 @@ class ExtendedStreamingLLMRouter:
         finally:
             loop.close()
 
-    def responses_stream_sync(self, *args, model: str = None, on_chunk: Optional[Callable] = None, **kwargs):
-        stop_event: Optional[threading.Event] = kwargs.pop("stop_event", None)
-        q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+    def responses_stream_sync(
+        self, *args, model: str = None, on_chunk: Callable | None = None, **kwargs
+    ):
+        stop_event: threading.Event | None = kwargs.pop("stop_event", None)
+        q: queue.Queue[tuple[str, str | None]] = queue.Queue()
         err = [None]
 
         def producer():
@@ -300,7 +327,9 @@ class ExtendedStreamingLLMRouter:
 
             async def run():
                 try:
-                    async for tok in self.responses_stream(*args, model=model, on_chunk=on_chunk, **kwargs):
+                    async for tok in self.responses_stream(
+                        *args, model=model, on_chunk=on_chunk, **kwargs
+                    ):
                         if stop_event and stop_event.is_set():
                             break
                         q.put(("token", tok))

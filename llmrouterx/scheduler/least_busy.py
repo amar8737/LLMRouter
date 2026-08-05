@@ -1,16 +1,49 @@
-from .base import BaseScheduler
+from __future__ import annotations
+
 import asyncio
+import logging
+
+from .base import BaseScheduler
+
+logger = logging.getLogger(__name__)
 
 
 class LeastBusyScheduler(BaseScheduler):
-    def __init__(self):
+    """
+    Selects the healthy client with the fewest active requests.
+
+    Skips unhealthy and saturated clients.
+    """
+
+    def __init__(self) -> None:
         self._lock = asyncio.Lock()
 
     async def select(self, provider_router):
         async with self._lock:
-            candidates = [c for c in provider_router.clients if await c.is_healthy()]
-            if not candidates:
-                return None
-            # choose client with fewest active requests (snapshot under lock)
-            candidates.sort(key=lambda c: getattr(c, "active_requests", 0))
-            return candidates[0]
+
+            best = None
+            best_load = float("inf")
+
+            for client in provider_router.clients:
+
+                try:
+
+                    if not await client.is_healthy():
+                        continue
+
+                    load = client.active_requests
+
+                    if load < best_load:
+                        best = client
+                        best_load = load
+
+                except asyncio.CancelledError:
+                    raise
+
+                except Exception:
+                    logger.exception(
+                        "Failed to inspect client '%s'",
+                        getattr(client, "api_key", "<unknown>"),
+                    )
+
+            return best

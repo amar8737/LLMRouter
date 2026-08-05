@@ -92,6 +92,7 @@ from llmrouter.client import ClientNode
 from llmrouter.providers import ProviderRouter, CompositeRouter, StubClient
 from llmrouter.scheduler import RoundRobinScheduler
 
+
 async def main():
     # Create a stub client for testing
     client = StubClient("stub")
@@ -102,6 +103,7 @@ async def main():
 
     resp = await router.chat(prompt="Hello from enhanced README")
     print(resp)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

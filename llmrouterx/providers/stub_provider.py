@@ -1,4 +1,3 @@
-from typing import Optional
 import asyncio
 
 
@@ -8,7 +7,7 @@ class StubClient:
     def __init__(self, name: str = "stub"):
         self.name = name
 
-    async def request(self, op: str, payload: dict, api_key: Optional[str] = None, **kwargs):
+    async def request(self, op: str, payload: dict, api_key: str | None = None, **kwargs):
         await asyncio.sleep(0)
         # payload may include prompt or text etc.
         body = payload.get("prompt") or payload.get("text") or payload.get("args")
@@ -28,13 +27,16 @@ class StubStreamingClient:
     returns an awaitable coroutine producing the full response dict.
     """
 
-    def __init__(self, name: str = "stub-stream", chunks: Optional[list] = None, delay: float = 0.01):
+    def __init__(self, name: str = "stub-stream", chunks: list | None = None, delay: float = 0.01):
         self.name = name
         self.chunks = chunks or ["Hello", " world", " from", " stub"]
         self.delay = delay
 
-    def request(self, op: str, payload: dict, api_key: Optional[str] = None, stream: bool = False, **kwargs):
+    def request(
+        self, op: str, payload: dict, api_key: str | None = None, stream: bool = False, **kwargs
+    ):
         if stream:
+
             async def gen():
                 for part in self.chunks:
                     await asyncio.sleep(self.delay)
@@ -44,6 +46,11 @@ class StubStreamingClient:
 
         async def full():
             await asyncio.sleep(0)
-            return {"provider": self.name, "api_key": api_key, "op": op, "response": "".join(self.chunks)}
+            return {
+                "provider": self.name,
+                "api_key": api_key,
+                "op": op,
+                "response": "".join(self.chunks),
+            }
 
         return full()

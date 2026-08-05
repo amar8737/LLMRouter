@@ -1,15 +1,14 @@
-import asyncio
 import time
 
 import pytest
 
-from llmrouterx.providers.stub_provider import StubClient
 from llmrouterx.client.client_node import ClientNode
-from llmrouterx.providers.provider_router import ProviderRouter
-from llmrouterx.providers.composite_router import CompositeRouter
-from llmrouterx.router.llmrouter import LLMRouter
 from llmrouterx.metrics.metrics import MetricsCollector
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.stub_provider import StubClient
 from llmrouterx.retry.exponential import ExponentialRetry, HTTPError
+from llmrouterx.router.llmrouter import LLMRouter
 
 
 @pytest.mark.asyncio
