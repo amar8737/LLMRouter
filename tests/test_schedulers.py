@@ -51,7 +51,11 @@ def test_least_busy_selects_least_active():
 
 def test_random_selects_healthy():
     client = StubClient("c")
-    nodes = [SimpleNode("k0", client, healthy=False), SimpleNode("k1", client, healthy=True), SimpleNode("k2", client, healthy=True)]
+    nodes = [
+        SimpleNode("k0", client, healthy=False),
+        SimpleNode("k1", client, healthy=True),
+        SimpleNode("k2", client, healthy=True),
+    ]
     provider = ProviderRouter("prov3", nodes)
     rs = RandomScheduler()
     picks = set()

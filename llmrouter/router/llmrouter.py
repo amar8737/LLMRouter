@@ -16,7 +16,15 @@ class LLMRouter:
     Orchestrates middleware, retries, and metrics around the CompositeRouter.
     """
 
-    def __init__(self, composite_router: CompositeRouter, *, retry: ExponentialRetry = None, metrics: MetricsCollector = None, middleware: list[BaseMiddleware] | None = None, max_retries: int = 3):
+    def __init__(
+        self,
+        composite_router: CompositeRouter,
+        *,
+        retry: ExponentialRetry = None,
+        metrics: MetricsCollector = None,
+        middleware: list[BaseMiddleware] | None = None,
+        max_retries: int = 3,
+    ):
         self._composite = composite_router
         self.retry = retry or ExponentialRetry(max_retries=max_retries)
         self.metrics = metrics or MetricsCollector()
