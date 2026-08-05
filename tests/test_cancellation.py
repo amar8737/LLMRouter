@@ -1,9 +1,9 @@
 import asyncio
 
-from llmrouter.client.client_node import ClientNode
-from llmrouter.providers.provider_router import ProviderRouter
-from llmrouter.providers.composite_router import CompositeRouter
-from llmrouter.router.llmrouter import LLMRouter
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.router.llmrouter import LLMRouter
 
 
 class SlowClient:

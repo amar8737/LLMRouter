@@ -1,7 +1,7 @@
 import threading
 
-from llmrouter.providers.stub_provider import StubStreamingClient
-from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
+from llmrouterx.providers.stub_provider import StubStreamingClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
 
 
 def test_chat_stream_sync_with_stop_event():

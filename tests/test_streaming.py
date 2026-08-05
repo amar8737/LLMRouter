@@ -1,10 +1,10 @@
 import time
 
-from llmrouter.providers.stub_provider import StubClient
-from llmrouter.client.client_node import ClientNode
-from llmrouter.providers.provider_router import ProviderRouter
-from llmrouter.providers.composite_router import CompositeRouter
-from llmrouter.router.streaming import StreamingLLMRouter
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.router.streaming import StreamingLLMRouter
 
 
 def test_async_streaming_and_callback():

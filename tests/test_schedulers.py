@@ -1,13 +1,13 @@
 import asyncio
 
-from llmrouter.client.client_node import ClientNode
-from llmrouter.providers.provider_router import ProviderRouter
-from llmrouter.providers.stub_provider import StubClient
-from llmrouter.scheduler.least_busy import LeastBusyScheduler
-from llmrouter.scheduler.priority import PriorityScheduler
-from llmrouter.scheduler.random import RandomScheduler
-from llmrouter.scheduler.round_robin import RoundRobinScheduler
-from llmrouter.scheduler.weighted import WeightedScheduler
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.provider_router import ProviderRouter
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.scheduler.least_busy import LeastBusyScheduler
+from llmrouterx.scheduler.priority import PriorityScheduler
+from llmrouterx.scheduler.random import RandomScheduler
+from llmrouterx.scheduler.round_robin import RoundRobinScheduler
+from llmrouterx.scheduler.weighted import WeightedScheduler
 
 
 class SimpleNode(ClientNode):

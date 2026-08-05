@@ -1,7 +1,7 @@
 import asyncio
 
-from llmrouter.providers.stub_provider import StubStreamingClient
-from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
+from llmrouterx.providers.stub_provider import StubStreamingClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
 
 
 def test_stub_streaming_async_and_sync():

@@ -1,5 +1,5 @@
-from llmrouter.providers.stub_provider import StubClient
-from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
+from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.router.extended_streaming import ExtendedStreamingLLMRouter
 
 
 def test_chat_sync_and_stream_sync_complete():
