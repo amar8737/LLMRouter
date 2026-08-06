@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
+from ..adapters.base import BaseProviderAdapter
 from .async_stream import AsyncStreamEngine
-from .provider_adapter import BaseProviderAdapter
 from .sync import SyncStreamEngine
 from .tokenizer import TokenizerManager, default_tokenizer
 

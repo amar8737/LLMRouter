@@ -26,7 +26,7 @@ class RouterConfig:
     max_concurrent_per_key: int = 100
 
     @classmethod
-    def from_env(cls) -> "RouterConfig":
+    def from_env(cls) -> RouterConfig:
         return cls(
             timeout=float(
                 os.getenv(
@@ -69,7 +69,7 @@ class RouterConfig:
                 "max_concurrent_per_key must be > 0."
             )
 
-    def copy(self, **updates: Any) -> "RouterConfig":
+    def copy(self, **updates: Any) -> RouterConfig:
         values = {
             "providers": self.providers,
             "scheduler": self.scheduler,

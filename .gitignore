@@ -222,3 +222,6 @@ __marimo__/
 requirements.md
 feedback.md
 llmrouter_source.txt
+vtcode.toml
+.idea/*
+.vtcode/*

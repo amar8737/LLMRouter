@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from threading import RLock
-from typing import Iterator
 
 from ..providers.provider_router import ProviderRouter
 

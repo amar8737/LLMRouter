@@ -395,31 +395,10 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any
 
-
-class RequestContext:
-    """
-    Shared request context available to every middleware.
-    """
-
-    def __init__(self) -> None:
-        self.data: dict[str, Any] = {}
-
-    def set(self, key: str, value: Any) -> None:
-        self.data[key] = value
-
-    def get(
-        self,
-        key: str,
-        default: Any = None,
-    ) -> Any:
-        return self.data.get(key, default)
+from ..context import RequestContext
 
 
 class MiddlewareResult:
-    """
-    Result returned by middleware.
-    """
-
     def __init__(
         self,
         *,
@@ -433,26 +412,6 @@ class MiddlewareResult:
 
 
 class BaseMiddleware(ABC):
-    """
-    Base middleware class.
-
-    Lifecycle:
-
-        before_request()
-
-                ↓
-
-            provider
-
-                ↓
-
-        after_response()
-
-                ↓
-
-        on_exception()
-    """
-
     async def before_request(
         self,
         operation: str,
@@ -691,152 +650,6 @@ class TokenizerManager:
 
 
 default_tokenizer = TokenizerManager()
-==> ./llmrouterx/streaming/provider_adapter.py <==
-from __future__ import annotations
-
-from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
-from typing import Any
-
-
-class BaseProviderAdapter(ABC):
-    """
-    Common interface for all LLM providers.
-    """
-
-    @abstractmethod
-    async def chat(
-        self,
-        prompt: str,
-        *,
-        model: str | None = None,
-        **kwargs: Any,
-    ) -> str:
-        """
-        Return the full response.
-        """
-
-    @abstractmethod
-    async def stream(
-        self,
-        prompt: str,
-        *,
-        model: str | None = None,
-        **kwargs: Any,
-    ) -> AsyncGenerator[str, None]:
-        """
-        Yield tokens from the provider.
-        """
-
-    @abstractmethod
-    async def embeddings(
-        self,
-        text: str,
-        *,
-        model: str | None = None,
-        **kwargs: Any,
-    ) -> list[float]:
-        """
-        Generate embeddings.
-        """
-
-
-class GenericProviderAdapter(BaseProviderAdapter):
-    """
-    Adapter for OpenAI-compatible SDKs.
-
-    Works with:
-
-    - NVIDIA NIM
-    - OpenAI
-    - Together
-    - Groq
-    - Local OpenAI-compatible APIs
-    """
-
-    def __init__(
-        self,
-        client: Any,
-        *,
-        default_model: str | None = None,
-        embedding_model: str | None = None,
-    ) -> None:
-        self.client = client
-        self.default_model = default_model
-        self.embedding_model = embedding_model
-
-    async def chat(
-        self,
-        prompt: str,
-        *,
-        model: str | None = None,
-        **kwargs: Any,
-    ) -> str:
-
-        response = await self.client.chat.completions.create(
-            model=model or self.default_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            stream=False,
-            **kwargs,
-        )
-
-        return response.choices[0].message.content
-
-    async def stream(
-        self,
-        prompt: str,
-        *,
-        model: str |None = None,
-        **kwargs: Any,
-    ) -> AsyncGenerator[str, None]:
-
-        stream = await self.client.chat.completions.create(
-            model=model or self.default_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            stream=True,
-            **kwargs,
-        )
-
-        async for chunk in stream:
-
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-
-            if delta is None:
-                continue
-
-            token = getattr(delta, "content", None)
-
-            if token:
-                yield token
-
-    async def embeddings(
-        self,
-        text: str,
-        *,
-        model: str | None = None,
-        **kwargs: Any,
-    ) -> list[float]:
-
-        result = await self.client.embeddings.create(
-            model=model or self.embedding_model,
-            input=text,
-            **kwargs,
-        )
-
-        return result.data[0].embedding
 ==> ./llmrouterx/streaming/sync.py <==
 from __future__ import annotations
 
@@ -2200,6 +2013,8 @@ class NIMAdapter(OpenAICompatibleAdapter):
     pass
 ==> ./llmrouterx/adapters/__init__.py <==
 
+==> ./llmrouterx/adapters/factory.py <==
+
 ==> ./llmrouterx/adapters/azure.py <==
 from __future__ import annotations
 
@@ -2228,6 +2043,8 @@ class GroqAdapter(OpenAICompatibleAdapter):
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any
+from ..adapters.base import BaseProviderAdapter
+from ..streaming.manager import StreamingManager
 
 
 class ClientNode:
@@ -2248,11 +2065,13 @@ class ClientNode:
     def __init__(
         self,
         api_key: str,
-        client: Any,
+        client: BaseProviderAdapter,
         *,
+        streaming: StreamingManager | None = None,
+        timeout: float = 60.0,
         max_concurrent: int = 100,
-        timeout: float | None = None,
-    ):
+    ) -> None:
+        self.streaming = streaming
         self.api_key = api_key
         self.client = client
 
@@ -3416,7 +3235,7 @@ from ..providers.composite_router import CompositeRouter
 from ..providers.provider_router import ProviderRouter
 from ..retry.exponential import ExponentialRetry
 from ..streaming.manager import StreamingManager
-from ..streaming.provider_adapter import GenericProviderAdapter
+from ..adapters.base import BaseProviderAdapter
 
 from .llmrouter import LLMRouter
 
@@ -3455,7 +3274,7 @@ class RouterFactory:
 
             for client_cfg in provider_cfg["clients"]:
 
-                adapter = GenericProviderAdapter(
+                adapter = BaseProviderAdapter(
                     client_cfg["client"],
                     default_model=client_cfg.get(
                         "default_model"

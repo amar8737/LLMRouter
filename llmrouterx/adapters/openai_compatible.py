@@ -64,7 +64,6 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         )
 
         async for chunk in stream:
-
             if not chunk.choices:
                 continue
 
@@ -108,20 +107,22 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                 **kwargs,
             )
 
-        return await self.client.responses.create(
-            model=model or self.default_model,
-            *args,
+        params = {
+            "model": model or self.default_model,
             **kwargs,
+        }
+
+        return await self.client.responses.create(
+            *args,
+            **params,
         )
 
     async def health_check(self) -> bool:
 
         try:
-
             await self.client.models.list()
 
             return True
 
         except Exception:
-
             return False

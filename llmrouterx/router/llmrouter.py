@@ -3,18 +3,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import Any
 
-from ..client.client_node import ClientNode
 from ..config.config import RouterConfig
+from ..context import RequestContext
+from ..exceptions import NoHealthyClientError
 from ..metrics.metrics import MetricsCollector
-from ..middleware.base import BaseMiddleware
+from ..middleware.base import BaseMiddleware, MiddlewareResult
 from ..providers.composite_router import CompositeRouter
-from ..providers.provider_router import ProviderRouter
-from ..retry.exponential import ExponentialRetry
+from ..retry.exponential import ExponentialRetry, HTTPError
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
+    asyncio.TimeoutError,
+    HTTPError,
+)
 
 
 class LLMRouter:
@@ -26,7 +33,7 @@ class LLMRouter:
         self,
         composite_router: CompositeRouter,
         *,
-        retry: ExponentialRetry | None = None,
+        retry: Any | None = None,
         metrics: MetricsCollector | None = None,
         middleware: list[BaseMiddleware] | None = None,
         max_retries: int = 3,
@@ -39,7 +46,7 @@ class LLMRouter:
 
         self.metrics = metrics or MetricsCollector()
 
-        self.middleware = middleware or []
+        self.middleware = list(middleware or [])
 
     # --------------------------------------------------------
     # Middleware
@@ -49,37 +56,95 @@ class LLMRouter:
         self,
         op: str,
         payload: dict[str, Any],
-    ) -> dict[str, Any]:
+        context: RequestContext,
+    ) -> tuple[dict[str, Any], Any | None]:
+        """
+        Run ``before_request`` hooks.
+
+        Returns the (possibly rewritten) payload plus a short-circuit response
+        when a middleware asked to stop.
+        """
 
         for middleware in self.middleware:
-            payload = (
-                await middleware.before_request(
-                    op,
-                    payload,
-                )
-                or payload
+            result = await middleware.before_request(op, payload, context)
+
+            if result is None:
+                continue
+
+            if isinstance(result, MiddlewareResult):
+                if result.payload is not None:
+                    payload = result.payload
+
+                if result.stop:
+                    return payload, result.response
+
+                continue
+
+            if isinstance(result, dict):
+                payload = result
+                continue
+
+            raise TypeError(
+                f"{type(middleware).__name__}.before_request must return "
+                f"None, a dict, or a MiddlewareResult; got {type(result).__name__}."
             )
 
-        return payload
+        return payload, None
 
     async def _after(
         self,
         op: str,
         payload: dict[str, Any],
-        response: dict[str, Any],
-    ) -> dict[str, Any]:
+        response: Any,
+        context: RequestContext,
+    ) -> Any:
+        """
+        Run ``after_response`` hooks.
+        """
 
         for middleware in self.middleware:
-            response = (
-                await middleware.after_response(
-                    op,
-                    payload,
-                    response,
-                )
-                or response
-            )
+            result = await middleware.after_response(op, payload, response, context)
+
+            if result is None:
+                continue
+
+            if isinstance(result, MiddlewareResult):
+                if result.response is not None:
+                    response = result.response
+
+                if result.stop:
+                    break
+
+                continue
+
+            response = result
 
         return response
+
+    async def _on_exception(
+        self,
+        op: str,
+        payload: dict[str, Any],
+        exc: BaseException,
+        context: RequestContext,
+    ) -> None:
+        """
+        Notify middleware about a failed attempt.
+
+        Observers must never mask the original failure, so errors raised by a
+        hook here are logged rather than propagated.
+        """
+
+        for middleware in self.middleware:
+            try:
+                await middleware.on_exception(op, payload, exc, context)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Middleware %s.on_exception raised; ignoring.",
+                    type(middleware).__name__,
+                )
 
     # --------------------------------------------------------
     # Core routing
@@ -89,12 +154,22 @@ class LLMRouter:
         self,
         op: str,
         payload: dict[str, Any],
-    ) -> dict[str, Any]:
+        context: RequestContext | None = None,
+    ) -> Any:
 
-        payload = await self._before(
-            op,
-            payload,
+        context = context or RequestContext(
+            operation=op,
+            prompt=payload.get("prompt"),
+            model=payload.get("model"),
+            max_retries=getattr(self.retry, "max_retries", 0),
         )
+
+        payload, short_circuit = await self._before(op, payload, context)
+
+        if short_circuit is not None:
+            self.metrics.incr(f"middleware.short_circuit.{op}")
+            context.finish()
+            return short_circuit
 
         started = time.perf_counter()
 
@@ -113,58 +188,64 @@ class LLMRouter:
                     op,
                     payload,
                     response,
+                    context,
                 )
 
                 elapsed = time.perf_counter() - started
 
                 self.metrics.incr(f"requests.{op}")
+                self.metrics.timing(f"latency.{op}", elapsed)
 
-                self.metrics.timing(
-                    f"latency.{op}",
-                    elapsed,
-                )
+                context.finish()
 
                 return response
 
             except asyncio.CancelledError:
+                self.metrics.incr(f"cancelled.{op}")
                 raise
 
-            except Exception as exc:
+            except NoHealthyClientError as exc:
+                self.metrics.incr(f"errors.{op}.no_healthy_clients")
+                logger.error("No healthy clients for '%s'", op)
+                raise
 
+            except RETRYABLE_EXCEPTIONS as exc:
                 attempt += 1
+                self.metrics.incr(f"errors.{op}")
 
-                self.metrics.incr(
-                    f"errors.{op}"
-                )
+                should_retry = self.retry.should_retry(exc, attempt)
 
-                if not self.retry.should_retry(
-                    exc,
-                    attempt,
-                ):
+                if not should_retry:
+                    logger.error(
+                        "Max retries exceeded for '%s': %s",
+                        op,
+                        str(exc),
+                    )
+                    self.metrics.incr(f"errors.{op}.retries_exhausted")
                     raise
 
-                delay = self.retry.get_backoff(
-                    exc,
-                    attempt,
-                )
-
+                delay = self.retry.get_backoff(exc, attempt)
                 logger.warning(
-                    "Retrying %s attempt=%d delay=%.2fs",
+                    "Retrying '%s' (attempt %d, delay=%.2fs): %s",
                     op,
                     attempt,
                     delay,
+                    str(exc),
                 )
 
                 with suppress(Exception):
-                    self.metrics.timing(
-                        f"retry.backoff.{op}",
-                        delay,
-                    )
+                    self.metrics.timing(f"retry.backoff.{op}", delay)
 
-                await self.retry.wait(
-                    exc,
-                    attempt,
+                await self.retry.wait(exc, attempt)
+
+            except Exception as exc:
+                self.metrics.incr(f"errors.{op}.non_retryable")
+                logger.exception(
+                    "Non-retryable error in '%s': %s",
+                    op,
+                    exc.__class__.__name__,
                 )
+                raise
 
     # --------------------------------------------------------
     # Public API
@@ -174,7 +255,10 @@ class LLMRouter:
         self,
         prompt: str,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> Any:
+        """
+        Send a chat request to the best available provider.
+        """
 
         return await self._execute(
             "chat",
@@ -188,7 +272,10 @@ class LLMRouter:
         self,
         text: str,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> Any:
+        """
+        Generate embeddings using the best available provider.
+        """
 
         return await self._execute(
             "embeddings",
@@ -202,7 +289,10 @@ class LLMRouter:
         self,
         *args: Any,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> Any:
+        """
+        Call the provider's Responses API, when supported.
+        """
 
         return await self._execute(
             "responses",
@@ -212,6 +302,105 @@ class LLMRouter:
             },
         )
 
+    async def stream(
+        self,
+        prompt: str,
+        **kwargs: Any,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream response tokens from the best available provider.
+
+        Failover happens only *before* the first token is emitted. Once any
+        token has been delivered the stream is committed to that provider,
+        because switching mid-stream would duplicate output. Retries are not
+        applied to streams for the same reason.
+        """
+
+        context = RequestContext(
+            operation="stream",
+            prompt=prompt,
+            model=kwargs.get("model"),
+        )
+
+        payload, short_circuit = await self._before(
+            "stream",
+            {"prompt": prompt, **kwargs},
+            context,
+        )
+
+        if short_circuit is not None:
+            self.metrics.incr("middleware.short_circuit.stream")
+
+            for token in short_circuit:
+                yield token
+
+            context.finish()
+            return
+
+        prompt = payload.pop("prompt", prompt)
+
+        started = time.perf_counter()
+
+        tokens = 0
+
+        try:
+            async for token in self._router.stream(prompt, **payload):
+                tokens += 1
+                self.metrics.incr("stream.tokens")
+                yield token
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+            self.metrics.incr("errors.stream")
+            await self._on_exception("stream", payload, exc, context)
+            raise
+
+        else:
+            self.metrics.incr("requests.stream")
+            self.metrics.timing("latency.stream", time.perf_counter() - started)
+
+        finally:
+            context.set("tokens", tokens)
+            context.finish()
+
+    async def stream_to_text(
+        self,
+        prompt: str,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Collect a full streamed response into a single string.
+        """
+
+        parts: list[str] = []
+
+        async for token in self.stream(prompt, **kwargs):
+            parts.append(token)
+
+        return "".join(parts)
+
+    # --------------------------------------------------------
+    # Introspection
+    # --------------------------------------------------------
+
+    def get_metrics(self) -> dict[str, Any]:
+        """
+        Return a snapshot of counters and timings.
+        """
+        return self.metrics.snapshot()
+
+    async def health(self) -> dict[str, bool]:
+        """
+        Return a ``{provider_name: is_healthy}`` map.
+        """
+        return await self._router.health()
+
+    @property
+    def providers(self) -> list[Any]:
+        return self._router.providers
+
     # --------------------------------------------------------
     # Factory
     # --------------------------------------------------------
@@ -220,50 +409,15 @@ class LLMRouter:
     def from_config(
         cls,
         config: RouterConfig,
-    ) -> "LLMRouter":
+    ) -> LLMRouter:
+        """
+        Build a fully wired router from a :class:`RouterConfig`.
 
-        config.validate()
+        Delegates to :class:`~llmrouterx.router.factory.RouterFactory` so that
+        both entry points build identical object graphs.
+        """
 
-        providers: list[ProviderRouter] = []
+        # Imported lazily: RouterFactory imports this module.
+        from .factory import RouterFactory
 
-        for provider in config.providers:
-
-            if isinstance(
-                provider,
-                ProviderRouter,
-            ):
-                providers.append(provider)
-                continue
-
-            clients: list[ClientNode] = []
-
-            for raw_client in provider.get(
-                "clients",
-                [],
-            ):
-                clients.append(
-                    ClientNode(
-                        api_key=raw_client["api_key"],
-                        client=raw_client["client"],
-                        max_concurrent=config.max_concurrent_per_key,
-                        timeout=config.timeout,
-                    )
-                )
-
-            providers.append(
-                ProviderRouter(
-                    name=provider["name"],
-                    clients=clients,
-                    scheduler=provider.get(
-                        "scheduler",
-                        config.scheduler,
-                    ),
-                )
-            )
-
-        return cls(
-            CompositeRouter(providers),
-            retry=config.retry,
-            middleware=config.middleware,
-            max_retries=config.max_retries,
-        )
+        return RouterFactory.build(config)

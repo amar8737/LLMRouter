@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -29,6 +31,7 @@ class ExponentialRetry:
     - Exponential backoff
     - Jitter
     - Max backoff
+    - Extended backoff for rate limits
     """
 
     RETRYABLE_HTTP_STATUS = frozenset(
@@ -49,12 +52,14 @@ class ExponentialRetry:
         factor: float = 2.0,
         max_backoff: float = 60.0,
         jitter: bool = True,
+        rate_limit_min_backoff: float = 30.0,
     ) -> None:
         self.max_retries = max_retries
         self.base = base
         self.factor = factor
         self.max_backoff = max_backoff
         self.jitter = jitter
+        self.rate_limit_min_backoff = rate_limit_min_backoff
 
     def should_retry(
         self,
@@ -75,6 +80,33 @@ class ExponentialRetry:
             ),
         )
 
+    def _parse_retry_after(self, retry_after_header: str | None) -> float | None:
+        """
+        Parse Retry-After header (seconds or HTTP-date).
+        """
+
+        if not retry_after_header:
+            return None
+
+        try:
+            return float(retry_after_header)
+        except ValueError:
+            pass
+
+        try:
+            retry_date = parsedate_to_datetime(retry_after_header)
+            now = datetime.now(timezone.utc)
+            delay = (retry_date - now).total_seconds()
+
+            if delay <= 0:
+                return None
+
+            return delay
+        except (ValueError, TypeError):
+            pass
+
+        return None
+
     def get_backoff(
         self,
         exc: Exception,
@@ -84,17 +116,24 @@ class ExponentialRetry:
         Compute delay before next retry.
         """
 
-        if isinstance(exc, HTTPError):
-            retry_after = exc.headers.get("Retry-After")
-
+        if isinstance(exc, HTTPError) and exc.status_code == 429:
+            retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
             if retry_after is not None:
-                try:
-                    return min(
-                        float(retry_after),
-                        self.max_backoff,
-                    )
-                except ValueError:
-                    pass
+                return min(retry_after, self.max_backoff)
+
+            delay = self.base * (self.factor ** (attempt - 1))
+            delay = max(delay, self.rate_limit_min_backoff)
+            delay = min(delay, self.max_backoff)
+
+            if self.jitter:
+                delay *= random.uniform(0.5, 1.5)
+
+            return delay
+
+        if isinstance(exc, HTTPError):
+            retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
+            if retry_after is not None:
+                return min(retry_after, self.max_backoff)
 
         delay = min(
             self.base * (self.factor ** (attempt - 1)),

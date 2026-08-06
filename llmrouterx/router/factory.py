@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
+from ..adapters import AdapterFactory
 from ..client.client_node import ClientNode
 from ..config.config import RouterConfig
 from ..metrics.metrics import MetricsCollector
@@ -9,8 +8,6 @@ from ..providers.composite_router import CompositeRouter
 from ..providers.provider_router import ProviderRouter
 from ..retry.exponential import ExponentialRetry
 from ..streaming.manager import StreamingManager
-from ..streaming.provider_adapter import GenericProviderAdapter
-
 from .llmrouter import LLMRouter
 
 
@@ -43,19 +40,14 @@ class RouterFactory:
         providers: list[ProviderRouter] = []
 
         for provider_cfg in config.providers:
-
             clients: list[ClientNode] = []
 
             for client_cfg in provider_cfg["clients"]:
-
-                adapter = GenericProviderAdapter(
-                    client_cfg["client"],
-                    default_model=client_cfg.get(
-                        "default_model"
-                    ),
-                    embedding_model=client_cfg.get(
-                        "embedding_model"
-                    ),
+                adapter = AdapterFactory.create(
+                    provider=provider_cfg["name"],
+                    client=client_cfg["client"],
+                    default_model=client_cfg.get("default_model"),
+                    embedding_model=client_cfg.get("embedding_model"),
                 )
 
                 stream_manager = StreamingManager(
@@ -65,6 +57,7 @@ class RouterFactory:
                 node = ClientNode(
                     api_key=client_cfg["api_key"],
                     client=adapter,
+                    streaming=stream_manager,
                     timeout=config.timeout,
                     max_concurrent=config.max_concurrent_per_key,
                 )

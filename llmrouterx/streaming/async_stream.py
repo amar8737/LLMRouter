@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from .provider_adapter import BaseProviderAdapter
+from ..adapters.base import BaseProviderAdapter
 
 
 class AsyncStreamEngine:

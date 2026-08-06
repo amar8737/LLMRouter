@@ -1,5 +1,4 @@
-from .extended_streaming import ExtendedStreamingLLMRouter
+from .factory import RouterFactory
 from .llmrouter import LLMRouter
-from .streaming import StreamingLLMRouter
 
-__all__ = ["ExtendedStreamingLLMRouter", "LLMRouter", "StreamingLLMRouter"]
+__all__ = ["LLMRouter", "RouterFactory"]
