@@ -7,10 +7,46 @@ class StubClient:
     def __init__(self, name: str = "stub"):
         self.name = name
 
+    async def chat(self, prompt: str, **kwargs):
+        await asyncio.sleep(0)
+        return {
+            "provider": self.name,
+            "response": f"Chat from {self.name}: {prompt}",
+        }
+
+    async def embeddings(self, text: str, **kwargs):
+        await asyncio.sleep(0)
+        return {
+            "provider": self.name,
+            "response": f"Embeddings from {self.name}: {text}",
+        }
+
+    async def responses(self, *args, **kwargs):
+        await asyncio.sleep(0)
+        return {
+            "provider": self.name,
+            "response": f"Responses from {self.name}",
+        }
+
+    async def stream(self, prompt: str, **kwargs):
+        await asyncio.sleep(0)
+        for part in prompt.split():
+            yield {
+                "provider": self.name,
+                "response": part,
+            }
+
     async def request(self, op: str, payload: dict, api_key: str | None = None, **kwargs):
         await asyncio.sleep(0)
-        # payload may include prompt or text etc.
-        body = payload.get("prompt") or payload.get("text") or payload.get("args")
+        if op == "chat":
+            body = payload.get("prompt", "")
+        elif op == "embeddings":
+            body = payload.get("text", "")
+        elif op == "responses":
+            body = payload.get("args", ())
+        else:
+            body = ""
+
         return {
             "provider": self.name,
             "api_key": api_key,

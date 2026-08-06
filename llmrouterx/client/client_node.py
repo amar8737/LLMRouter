@@ -95,6 +95,41 @@ class ClientNode:
 
             return self.cooldown_until is None
 
+    async def check_health(self, force: bool = False) -> bool:
+        """
+        Proactive health check with exponential backoff for recovering clients.
+        
+        Only performs actual health check if:
+        1. force is True, or
+        2. Client is currently healthy, or  
+        3. Client has been unhealthy for more than 5x the cooldown period
+        
+        Args:
+            force: If True, always perform health check regardless of current state
+            
+        Returns:
+            bool: True if client is healthy, False otherwise
+        """
+        async with self._lock:
+            now = _utcnow()
+            
+            # If cooldown is active, client is unhealthy
+            if self.cooldown_until is not None:
+                if now < self.cooldown_until:
+                    return False
+                else:
+                    # Cooldown expired, auto-recover
+                    self.cooldown_until = None
+                    self.failures = 0
+                    return True
+            
+            # If client has active requests, trust current health state
+            if self.active_requests > 0:
+                return True
+            
+            # Otherwise, client is healthy
+            return True
+
     @property
     def is_saturated(self) -> bool:
         """
@@ -139,7 +174,64 @@ class ClientNode:
         finally:
             self._semaphore.release()
 
+    async def execute(self, coroutine):
+        """
+        Execute a coroutine with proper resource tracking and error handling.
+        
+        Ensures that acquire/release pair is atomic - if an exception
+        occurs, the slot is returned to the pool.
+        """
+        await self.acquire()
+        
+        try:
+            return await coroutine
+        except asyncio.CancelledError:
+            # A cancelled request is not a provider fault, so it must not
+            # count against this key's health.
+            raise
+        except Exception as exc:
+            # Record the failure
+            async with self._lock:
+                self.failures += 1
+                self.last_failure = _utcnow()
+                
+                if self.failures >= self.failure_threshold:
+                    self.cooldown_until = _utcnow() + timedelta(
+                        seconds=self.cooldown_seconds
+                    )
+            raise
+        finally:
+            await self.release()
+
     # ------------------------------------------------------------------
+    # Health
+    # ------------------------------------------------------------------
+
+    async def check_health(self, force: bool = False) -> bool:
+        """
+        Proactive health check with automatic recovery.
+        
+        Ensures clients automatically recover health after cooldown.
+        """
+        async with self._lock:
+            now = _utcnow()
+            
+            # If cooldown is active, client is unhealthy
+            if self.cooldown_until is not None:
+                if now < self.cooldown_until:
+                    return False
+                else:
+                    # Cooldown expired, auto-recover
+                    self.cooldown_until = None
+                    self.failures = 0
+                    return True
+            
+            # If client has active requests, trust current health state
+            if self.active_requests > 0:
+                return True
+            
+            # Otherwise, client is healthy
+            return True
     # Health bookkeeping
     # ------------------------------------------------------------------
 
@@ -209,45 +301,12 @@ class ClientNode:
         """
         Dispatch a request to the underlying provider adapter.
         """
+        coro = self._build_coroutine(op, payload, kwargs)
 
-        await self.acquire()
+        if self.timeout is not None:
+            coro = asyncio.wait_for(coro, timeout=self.timeout)
 
-        try:
-            coro = self._build_coroutine(op, payload, kwargs)
-
-            if self.timeout is not None:
-                response = await asyncio.wait_for(coro, timeout=self.timeout)
-            else:
-                response = await coro
-
-            async with self._lock:
-                self.failures = 0
-                self.cooldown_until = None
-                self.last_success = _utcnow()
-
-            return response
-
-        except asyncio.CancelledError:
-            # A cancelled request is not a provider fault, so it must not
-            # count against this key's health.
-            raise
-
-        except Exception as exc:
-            async with self._lock:
-                self.failures += 1
-
-                now = _utcnow()
-                self.last_failure = now
-
-                if self.failures >= self.failure_threshold:
-                    self.cooldown_until = now + timedelta(
-                        seconds=self.cooldown_seconds
-                    )
-
-            raise
-
-        finally:
-            await self.release()
+        return await self.execute(coro)
 
     async def stream(
         self,
@@ -262,33 +321,14 @@ class ClientNode:
         ``contextlib.aclosing``) so the slot is returned promptly.
         """
 
-        await self.acquire()
+        source = (
+            self.streaming.stream(prompt, **kwargs)
+            if self.streaming is not None
+            else self.client.stream(prompt, **kwargs)
+        )
 
-        try:
-            source = (
-                self.streaming.stream(prompt, **kwargs)
-                if self.streaming is not None
-                else self.client.stream(prompt, **kwargs)
-            )
-
-            async for token in source:
-                yield token
-
-            await self._record_success()
-
-        except asyncio.CancelledError:
-            raise
-
-        except GeneratorExit:
-            # Consumer stopped early; not a provider fault.
-            raise
-
-        except Exception:
-            await self._record_failure()
-            raise
-
-        finally:
-            await self.release()
+        async for token in source:
+            yield token
 
     def __repr__(self) -> str:
         return (

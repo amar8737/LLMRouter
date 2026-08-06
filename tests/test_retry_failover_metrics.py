@@ -39,6 +39,31 @@ class FlakyClient:
             raise RuntimeError("boom")
         return {"provider": "flaky", "op": op, "response": "ok"}
 
+    async def chat(self, prompt, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise RuntimeError("boom")
+        return {"provider": "flaky", "response": f"Chat response: {prompt}"}
+
+    async def embeddings(self, text, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise RuntimeError("boom")
+        return {"provider": "flaky", "response": f"Embeddings: {text}"}
+
+    async def responses(self, *args, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise RuntimeError("boom")
+        return {"provider": "flaky", "response": "Responses OK"}
+
+    async def stream(self, prompt, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise RuntimeError("boom")
+        for part in prompt.split():
+            yield {"provider": "flaky", "response": part}
+
 
 @pytest.mark.asyncio
 async def test_failover_to_next_provider_records_metrics():
@@ -76,6 +101,31 @@ class RetryAfterClient:
             # simulate HTTP 429 with Retry-After header
             raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
         return {"provider": "retry", "op": op, "response": "ok"}
+
+    async def chat(self, prompt, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
+        return {"provider": "retry", "response": f"Chat response: {prompt}"}
+
+    async def embeddings(self, text, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
+        return {"provider": "retry", "response": f"Embeddings: {text}"}
+
+    async def responses(self, *args, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
+        return {"provider": "retry", "response": "Responses OK"}
+
+    async def stream(self, prompt, **kwargs):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise HTTPError(429, "rate limited", headers={"Retry-After": "0.05"})
+        for part in prompt.split():
+            yield {"provider": "retry", "response": part}
 
 
 @pytest.mark.asyncio
