@@ -60,6 +60,8 @@ class RouterFactory:
                     streaming=stream_manager,
                     timeout=config.timeout,
                     max_concurrent=config.max_concurrent_per_key,
+                    failure_threshold=client_cfg.get("failure_threshold"),
+                    cooldown_seconds=client_cfg.get("cooldown_seconds"),
                 )
 
                 # Optional attachment for future use
