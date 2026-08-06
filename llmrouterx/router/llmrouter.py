@@ -247,6 +247,15 @@ class LLMRouter:
                 )
                 raise
 
+            except Exception as exc:
+                self.metrics.incr(f"errors.{op}.non_retryable")
+                logger.exception(
+                    "Non-retryable error in '%s': %s",
+                    op,
+                    exc.__class__.__name__,
+                )
+                raise
+
     # --------------------------------------------------------
     # Public API
     # --------------------------------------------------------
