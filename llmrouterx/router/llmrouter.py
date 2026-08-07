@@ -268,6 +268,7 @@ class LLMRouter:
                 except RETRYABLE_EXCEPTIONS as exc:
                     attempt += 1
                     self.metrics.incr(f"errors.{op}")
+                    await self._on_exception(op, payload, exc, context)
 
                     should_retry = self.retry.should_retry(exc, attempt)
 
@@ -301,6 +302,7 @@ class LLMRouter:
 
                 except Exception as exc:
                     self.metrics.incr(f"errors.{op}.non_retryable")
+                    await self._on_exception(op, payload, exc, context)
                     logger.exception(
                         "Non-retryable error in '%s' [req_id=%s]: %s",
                         op,
