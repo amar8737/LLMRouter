@@ -34,8 +34,10 @@ def test_router():
 
 @pytest.fixture
 def client(test_router):
-    app = create_app(router=test_router)
+    app = create_app(router=test_router, api_keys=["test-api-key"])
     with TestClient(app) as test_client:
+        # Add default auth header for all requests
+        test_client.headers = {"Authorization": "Bearer test-api-key"}
         yield test_client
 
 
@@ -137,11 +139,12 @@ def test_chat_completions_returns_503_when_no_healthy_provider():
     provider = ProviderRouter("broken_provider", [node])
     router = LLMRouter(CompositeRouter([provider]))
 
-    app = create_app(router=router)
+    app = create_app(router=router, api_keys=["test-api-key"])
     with TestClient(app) as test_client:
         response = test_client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer test-api-key"},
         )
     assert response.status_code == 503
 
@@ -219,11 +222,12 @@ def test_streaming_error_emits_503_and_done():
     provider = ProviderRouter("broken_provider", [node])
     router = LLMRouter(CompositeRouter([provider]))
 
-    app = create_app(router=router)
+    app = create_app(router=router, api_keys=["test-api-key"])
     with TestClient(app) as test_client:
         response = test_client.post(
             "/v1/chat/completions",
             json={"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            headers={"Authorization": "Bearer test-api-key"},
         )
         assert response.status_code == 200
         text = response.text

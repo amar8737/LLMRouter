@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from llmrouterx.config.api_keys import validate_api_key, KEY_PREFIX, VALID_SCOPES
+from llmrouterx.config.api_keys import validate_api_key
 
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
@@ -21,6 +21,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         import time
         import uuid
+
         request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         request.state.request_id = request_id
         started = time.perf_counter()
@@ -28,6 +29,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception:
             import logging
+
             logger = logging.getLogger("llmrouterx.server")
             logger.exception(
                 "%s %s [req_id=%s] failed",
@@ -40,6 +42,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         if self.enabled:
             import logging
+
             logger = logging.getLogger("llmrouterx.server")
             logger.info(
                 "%s %s %d %.1fms [req_id=%s]",
@@ -87,10 +90,12 @@ def make_bearer_guard(
             if check_db:
                 # Check API key database
                 record = validate_api_key(bearer_token, db_path)
-                if record and record.is_valid:
-                    # Check scopes for /v1/* endpoints
-                    if "chat" in record.scopes or "embeddings" in record.scopes:
-                        return
+                if (
+                    record
+                    and record.is_valid
+                    and ("chat" in record.scopes or "embeddings" in record.scopes)
+                ):
+                    return
 
         # Also check query param for token
         query_token = request.query_params.get("token")
@@ -99,9 +104,12 @@ def make_bearer_guard(
                 return
             if check_db:
                 record = validate_api_key(query_token, db_path)
-                if record and record.is_valid:
-                    if "chat" in record.scopes or "embeddings" in record.scopes:
-                        return
+                if (
+                    record
+                    and record.is_valid
+                    and ("chat" in record.scopes or "embeddings" in record.scopes)
+                ):
+                    return
 
         raise HTTPException(
             status_code=401,

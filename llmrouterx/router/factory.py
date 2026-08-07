@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from ..adapters import AdapterFactory
 from ..client.client_node import ClientNode
-from ..config.config import RouterConfig
 from ..config.api_keys import resolve_api_key
+from ..config.config import RouterConfig
 from ..metrics.metrics import MetricsCollector
 from ..providers.composite_router import CompositeRouter
 from ..providers.provider_router import ProviderRouter

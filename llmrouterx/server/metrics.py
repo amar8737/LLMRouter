@@ -9,8 +9,6 @@ from fastapi import Depends, Request
 
 from llmrouterx.router.llmrouter import LLMRouter
 
-from .dependencies import get_admin_guard
-
 
 def _aggregate_per_provider(
     snapshot: dict[str, Any],
@@ -43,7 +41,6 @@ def _aggregate_per_provider(
         }
     }
     """
-    from statistics import mean
 
     result: dict[str, Any] = {"providers": {}, "global": {}}
 
@@ -139,6 +136,7 @@ def _compute_percentiles(values: list[float]) -> dict[str, float]:
     sorted_vals = sorted(values)
     n = len(sorted_vals)
     from statistics import mean
+
     return {
         "count": n,
         "min": round(sorted_vals[0] * 1000, 2),
@@ -188,6 +186,7 @@ def create_health_endpoint(start_time: float, health_timeout: float | None):
         rt: LLMRouter = request.app.state.llm_router
 
         import asyncio
+
         if health_timeout is not None:
             try:
                 provider_health = await asyncio.wait_for(rt.health(), timeout=health_timeout)

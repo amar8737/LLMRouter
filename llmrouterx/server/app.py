@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,7 @@ from statistics import mean
 from typing import Any, Literal
 
 try:
-    from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
+    from fastapi import Depends, FastAPI, HTTPException, Request, status
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -24,13 +25,11 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from llmrouterx.config.api_keys import (
-    APIKey,
-    get_api_key_db,
-    create_api_key,
-    validate_api_key,
     KEY_PREFIX,
     VALID_SCOPES,
-    APIKeyDatabase,
+    create_api_key,
+    get_api_key_db,
+    validate_api_key,
 )
 from llmrouterx.config.config import RouterConfig
 from llmrouterx.exceptions import NoHealthyClientError, StreamError
@@ -208,10 +207,12 @@ def _make_bearer_guard(
             if check_db:
                 # Check API key database
                 record = validate_api_key(bearer_token, db_path)
-                if record and record.is_valid:
-                    # Check scopes for /v1/* endpoints
-                    if "chat" in record.scopes or "embeddings" in record.scopes:
-                        return
+                if (
+                    record
+                    and record.is_valid
+                    and ("chat" in record.scopes or "embeddings" in record.scopes)
+                ):
+                    return
 
         # Also check query param for token
         query_token = request.query_params.get("token")
@@ -220,9 +221,12 @@ def _make_bearer_guard(
                 return
             if check_db:
                 record = validate_api_key(query_token, db_path)
-                if record and record.is_valid:
-                    if "chat" in record.scopes or "embeddings" in record.scopes:
-                        return
+                if (
+                    record
+                    and record.is_valid
+                    and ("chat" in record.scopes or "embeddings" in record.scopes)
+                ):
+                    return
 
         raise HTTPException(
             status_code=401,
@@ -484,7 +488,9 @@ def create_app(
     # API Key Management (Admin only)
     # ------------------------------------------------------------------
 
-    @app.get("/admin/api-keys", response_model=APIKeyListResponse, dependencies=[Depends(admin_guard)])
+    @app.get(
+        "/admin/api-keys", response_model=APIKeyListResponse, dependencies=[Depends(admin_guard)]
+    )
     async def list_api_keys(request: Request) -> APIKeyListResponse:
         """List all API keys (admin only)."""
         db = get_api_key_db()
@@ -506,14 +512,14 @@ def create_app(
             ]
         )
 
-    @app.post("/admin/api-keys", response_model=APIKeyCreateResponse, dependencies=[Depends(admin_guard)])
-    async def create_api_key_endpoint(
-        request: Request,
-        body: APIKeyCreateRequest = Body(...),
-    ) -> APIKeyCreateResponse:
+    @app.post(
+        "/admin/api-keys", response_model=APIKeyCreateResponse, dependencies=[Depends(admin_guard)]
+    )
+    async def create_api_key_endpoint(request: Request) -> APIKeyCreateResponse:
         """Create a new API key (admin only)."""
+        body = await request.json()
         # Validate scopes
-        for scope in body.scopes:
+        for scope in body.get("scopes", ["chat", "embeddings"]):
             if scope not in VALID_SCOPES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -521,9 +527,9 @@ def create_app(
                 )
 
         full_key, record = create_api_key(
-            name=body.name,
-            scopes=tuple(body.scopes),
-            expires_in=body.expires_in,
+            name=body["name"],
+            scopes=tuple(body.get("scopes", ["chat", "embeddings"])),
+            expires_in=body.get("expires_in"),
         )
 
         return APIKeyCreateResponse(
@@ -535,7 +541,11 @@ def create_app(
             expires_at=record.expires_at.isoformat() if record.expires_at else None,
         )
 
-    @app.delete("/admin/api-keys/{prefix}", response_model=APIKeyRevokeResponse, dependencies=[Depends(admin_guard)])
+    @app.delete(
+        "/admin/api-keys/{prefix}",
+        response_model=APIKeyRevokeResponse,
+        dependencies=[Depends(admin_guard)],
+    )
     async def revoke_api_key(prefix: str) -> APIKeyRevokeResponse:
         """Revoke an API key by prefix (admin only)."""
         db = get_api_key_db()
@@ -620,7 +630,7 @@ def _sse_error(message: str, *, error_type: str, code: str) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
-_DASHBOARD_HTML = """\
+_DASHBOARD_HTML = """\  # ruff: noqa: E501
 <!DOCTYPE html>
 <html lang="en">
 <head>

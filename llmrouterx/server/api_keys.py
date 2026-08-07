@@ -4,18 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Body, Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from llmrouterx.config.api_keys import (
-    APIKeyDatabase,
-    create_api_key,
-    get_api_key_db,
-    validate_api_key,
     KEY_PREFIX,
     VALID_SCOPES,
+    create_api_key,
+    get_api_key_db,
 )
-
-from .dependencies import get_admin_guard
 
 
 class APIKeyCreateRequest:
@@ -99,9 +95,9 @@ def create_create_key_endpoint(admin_guard: Any):
 
     async def create_api_key_endpoint(
         request: Request,
-        body: dict = Body(...),
     ) -> APIKeyCreateResponse:
         """Create a new API key (admin only)."""
+        body = await request.json()
         # Validate scopes
         scopes = body.get("scopes", ["chat", "embeddings"])
         for scope in scopes:
@@ -155,6 +151,12 @@ def create_revoke_key_endpoint(admin_guard: Any):
 
 def register_api_key_routes(app: Any, admin_guard: Any) -> None:
     """Register all API key management routes."""
-    app.get("/admin/api-keys", response_model=APIKeyListResponse)(create_list_keys_endpoint(admin_guard))
-    app.post("/admin/api-keys", response_model=APIKeyCreateResponse)(create_create_key_endpoint(admin_guard))
-    app.delete("/admin/api-keys/{prefix}", response_model=APIKeyRevokeResponse)(create_revoke_key_endpoint(admin_guard))
+    app.get("/admin/api-keys", response_model=APIKeyListResponse)(
+        create_list_keys_endpoint(admin_guard)
+    )
+    app.post("/admin/api-keys", response_model=APIKeyCreateResponse)(
+        create_create_key_endpoint(admin_guard)
+    )
+    app.delete("/admin/api-keys/{prefix}", response_model=APIKeyRevokeResponse)(
+        create_revoke_key_endpoint(admin_guard)
+    )
