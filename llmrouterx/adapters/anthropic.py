@@ -71,11 +71,14 @@ class AnthropicAdapter(BaseProviderAdapter):
 
         blocks = getattr(response, "content", None) or []
 
-        return "".join(
-            block.text
-            for block in blocks
-            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
-        ) or ""
+        return (
+            "".join(
+                block.text
+                for block in blocks
+                if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+            )
+            or ""
+        )
 
     @translate_stream_errors
     async def stream(

@@ -42,12 +42,8 @@ def is_configured() -> bool:
     """Whether Langfuse credentials/host are present in the environment."""
     import os
 
-    has_host = bool(
-        os.getenv("LANGFUSE_HOST") or os.getenv("LANGFUSE_BASE_URL")
-    )
-    has_keys = bool(
-        os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")
-    )
+    has_host = bool(os.getenv("LANGFUSE_HOST") or os.getenv("LANGFUSE_BASE_URL"))
+    has_keys = bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
     return bool(has_host or has_keys)
 
 
@@ -116,9 +112,7 @@ class LangfuseMiddleware(BaseMiddleware):
                 "operation": context.operation,
                 "model": context.model,
                 "provider": context.provider,
-                "api_key_suffix": (
-                    context.api_key[-4:] if context.api_key else None
-                ),
+                "api_key_suffix": (context.api_key[-4:] if context.api_key else None),
                 "retry_count": context.retry_count,
                 "latency_ms": round(
                     ((context.finished_at or time.perf_counter()) - started) * 1000, 2

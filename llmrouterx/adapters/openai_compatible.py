@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from ..retry.exponential import HTTPError
@@ -81,15 +82,20 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
 
         async for chunk in stream:
             # A final chunk may carry usage (e.g. stream_options include_usage).
-            usage = getattr(chunk, "usage", None)
-            if usage is not None and context is not None:
-                context.set(
-                    "usage",
-                    {
-                        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                    },
-                )
+            # Guard the whole extraction so a malformed/missing usage block from a
+            # fallback provider (Groq, Mistral, ...) never terminates the stream.
+            if context is not None:
+                with suppress(Exception):
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        prompt_tokens, completion_tokens = self._extract_usage_tokens(usage)
+                        context.set(
+                            "usage",
+                            {
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                            },
+                        )
 
             if not chunk.choices:
                 continue

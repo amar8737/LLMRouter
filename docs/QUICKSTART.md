@@ -348,7 +348,7 @@ Or load the config in code:
 from llmrouterx.config import RouterConfig
 from llmrouterx.router.factory import RouterFactory
 
-config = RouterConfig.from_file("router.json")   # resolves keys automatically
+config = RouterConfig.from_file("router.json")  # resolves keys automatically
 router = RouterFactory.build(config)
 ```
 
@@ -363,11 +363,13 @@ a file (`api_key_file`), so secrets stay out of config. See
 ```python
 from llmrouterx import LLMRouter
 
-router = LLMRouter.from_cascade([
-    "openai:sk-...",
-    "anthropic:sk-ant-...",
-    "groq:gsk-...",
-])
+router = LLMRouter.from_cascade(
+    [
+        "openai:sk-...",
+        "anthropic:sk-ant-...",
+        "groq:gsk-...",
+    ]
+)
 ```
 
 Each `"provider:api_key"` becomes a fallback provider in order. The default
@@ -441,7 +443,7 @@ from llmrouterx.metrics import MetricsCollector
 metrics = MetricsCollector()
 metrics.track_tokens("openai", prompt_tokens=120, completion_tokens=45)
 snapshot = metrics.snapshot()["counters"]
-snapshot["tokens.prompt.total"]          # global prompt tokens
+snapshot["tokens.prompt.total"]  # global prompt tokens
 snapshot["tokens.total{provider=openai}"]  # per-provider total
 ```
 
@@ -453,7 +455,7 @@ from llmrouterx.exceptions import NoHealthyClientError
 try:
     response = await router.chat(prompt="Hello")
 except NoHealthyClientError as exc:
-    print(exc)          # message includes the "Failure sequence" block
+    print(exc)  # message includes the "Failure sequence" block
     for provider, api_key, error in exc.errors:
         print(provider, api_key, error)
 ```

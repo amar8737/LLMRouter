@@ -24,9 +24,7 @@ class NoHealthyClientError(ProviderError):
     def __init__(self, message: str, errors: list[Exception] | None = None) -> None:
         self.errors = list(errors or [])
         if self.errors:
-            detail = "\n".join(
-                f"  - {type(e).__name__}: {e}" for e in self.errors
-            )
+            detail = "\n".join(f"  - {type(e).__name__}: {e}" for e in self.errors)
             message = f"{message}\nFailure sequence:\n{detail}"
         super().__init__(message)
 

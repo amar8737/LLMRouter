@@ -34,11 +34,7 @@ class FailingClient:
 
 @pytest.fixture
 def client():
-    router = LLMRouter(
-        CompositeRouter(
-            [ProviderRouter("ok", [ClientNode("k", HealthyStub())])]
-        )
-    )
+    router = LLMRouter(CompositeRouter([ProviderRouter("ok", [ClientNode("k", HealthyStub())])]))
     app = create_app(router=router)
     with TestClient(app) as test_client:
         yield test_client
@@ -120,9 +116,7 @@ def test_transient_error_still_retries_and_succeeds():
                 raise HTTPError(429, "rate limited", headers={"Retry-After": "0.01"})
             return {"provider": "f", "response": "finally"}
 
-    router = LLMRouter(
-        CompositeRouter([ProviderRouter("f", [ClientNode("k", FlakyThenOk())])])
-    )
+    router = LLMRouter(CompositeRouter([ProviderRouter("f", [ClientNode("k", FlakyThenOk())])]))
     result = asyncio.run(router.chat("hi"))
     assert result["response"] == "finally"
 

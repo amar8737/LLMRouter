@@ -92,7 +92,21 @@ class MetricsCollector:
 
             if labels:
                 label_key = _serialize_labels(labels)
-                self._labeled_timings[key][label_key].append(seconds)
+                bucket = self._labeled_timings[key]
+                # Mirror the bounding applied to ``_labeled_counters``: cap the
+                # number of distinct label sets per timing key so that dynamic,
+                # high-cardinality labels can never grow this dict unbounded
+                # (which would be a memory leak in long-running processes).
+                if label_key not in bucket:
+                    if len(bucket) >= self._max_counter_keys:
+                        logger.warning(
+                            "Labeled timing '%s' dropped: max %d label sets reached.",
+                            key,
+                            self._max_counter_keys,
+                        )
+                        return
+                    bucket[label_key] = deque(maxlen=self._max_samples)
+                bucket[label_key].append(seconds)
 
     # -------------------------------------------------------
     # Token tracking
@@ -121,9 +135,7 @@ class MetricsCollector:
 
             label_key = _serialize_labels({"provider": provider})
             bucket = self._labeled_counters["tokens.total"]
-            bucket[label_key] = (
-                bucket.get(label_key, 0) + prompt_tokens + completion_tokens
-            )
+            bucket[label_key] = bucket.get(label_key, 0) + prompt_tokens + completion_tokens
 
     # -------------------------------------------------------
     # Snapshot

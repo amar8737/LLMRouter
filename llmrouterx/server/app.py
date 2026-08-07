@@ -149,7 +149,7 @@ def _make_bearer_guard(token: str | Sequence[str] | None) -> Any:
         if accepted is None:
             return
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[len("Bearer "):] in accepted:
+        if auth.startswith("Bearer ") and auth[len("Bearer ") :] in accepted:
             return
         raise HTTPException(
             status_code=401,
@@ -182,6 +182,7 @@ def _sse_done(request_id: str, created: int) -> str:
 
 class _AccessLogMiddleware(BaseHTTPMiddleware):
     """Inject a request ID and emit a per-request access log line."""
+
     def __init__(self, app, enabled: bool = True) -> None:
         super().__init__(app)
         self.enabled = enabled
@@ -377,9 +378,7 @@ def create_app(
         "/v1/chat/completions",
         dependencies=[Depends(api_key_guard)],
     )
-    async def chat_completions(
-        req: ChatCompletionRequest, request: Request
-    ) -> Any:
+    async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
         rt: LLMRouter = request.app.state.llm_router
         prompt = _extract_prompt(req.messages)
 
@@ -395,9 +394,7 @@ def create_app(
 
             async def sse_generator() -> AsyncGenerator[str, None]:
                 try:
-                    async for chunk in rt.stream(
-                        prompt=prompt, model=req.model, **kwargs
-                    ):
+                    async for chunk in rt.stream(prompt=prompt, model=req.model, **kwargs):
                         yield _sse_chunk(_coerce_text(chunk), request_id, created)
                 except NoHealthyClientError as exc:
                     yield _sse_error(str(exc), error_type="server_error", code="503")

@@ -40,21 +40,16 @@ def resolve_key(client: dict[str, Any]) -> str:
             with open(key_path, encoding="utf-8") as handle:
                 key = handle.read().strip()
         except OSError as exc:
-            raise KeyResolutionError(
-                f"Could not read api_key_file '{key_path}': {exc}"
-            ) from exc
+            raise KeyResolutionError(f"Could not read api_key_file '{key_path}': {exc}") from exc
         if not key:
             raise KeyResolutionError(f"api_key_file '{key_path}' is empty.")
         return key
 
     raise KeyResolutionError(
-        "Client is missing an API key. Provide 'api_key', 'api_key_env', "
-        "or 'api_key_file'."
+        "Client is missing an API key. Provide 'api_key', 'api_key_env', or 'api_key_file'."
     )
 
 
 def has_key_source(client: dict[str, Any]) -> bool:
     """Whether a client dict declares any API key source."""
-    return bool(
-        client.get("api_key") or client.get("api_key_env") or client.get("api_key_file")
-    )
+    return bool(client.get("api_key") or client.get("api_key_env") or client.get("api_key_file"))

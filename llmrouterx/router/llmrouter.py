@@ -33,13 +33,62 @@ RETRYABLE_EXCEPTIONS = (
 # transport pool avoids repeated TCP/TLS handshakes and lets requests to the
 # same host multiplex over a single connection. Created lazily so that
 # importing ``llmrouterx`` does not force a hard dependency on ``httpx``.
+#
+# ``httpx.AsyncClient`` binds to the asyncio event loop that is current when
+# the transport is first used. To stay correct under frameworks that spin up a
+# fresh event loop per test/request (pytest-asyncio, repeated ``asyncio.run``),
+# the cache records *which* loop the client was created for and invalidates the
+# entry whenever the active loop changes or the previous loop was closed. This
+# prevents ``RuntimeError: Event loop is closed`` / "Task attached to a different
+# loop" without forcing every caller to manage its own pool.
 _SHARED_HTTP_CLIENT: httpx.AsyncClient | None = None
+_SHARED_HTTP_CLIENT_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _current_event_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the currently active event loop, or ``None`` if there is none.
+
+    Prefers the *running* loop (the one that will actually drive async work),
+    falling back to the thread-default loop in synchronous contexts. Works
+    whether or not a loop is currently running.
+    """
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        return None
 
 
 def _get_shared_http_client() -> httpx.AsyncClient:
-    """Return the process-wide shared HTTP/2 connection pool."""
-    global _SHARED_HTTP_CLIENT
-    if _SHARED_HTTP_CLIENT is None:
+    """Return the process-wide shared HTTP/2 connection pool.
+
+    The returned client is invalidated and rebuilt whenever the active event
+    loop differs from the loop the cached client was created for (or the cached
+    loop has since been closed). This makes the pool safe to reuse across
+    event-loop lifecycles.
+    """
+    global _SHARED_HTTP_CLIENT, _SHARED_HTTP_CLIENT_LOOP
+
+    current = _current_event_loop()
+
+    cached = _SHARED_HTTP_CLIENT
+    if cached is not None:
+        cached_loop = _SHARED_HTTP_CLIENT_LOOP
+        if cached_loop is None or cached_loop is not current or cached_loop.is_closed():
+            # The cached client is bound to a different (or now-closed) event
+            # loop than the one currently active. Reusing it would fail with
+            # "Event loop is closed" / "Task attached to a different loop".
+            # Drop it; the caller gets a fresh client for the current loop.
+            # (The transport is released lazily on GC; embedders that use
+            # ``shutdown_shared_http_client`` get explicit async cleanup.)
+            _SHARED_HTTP_CLIENT = None
+            _SHARED_HTTP_CLIENT_LOOP = None
+            cached = None
+
+    if cached is None:
         import httpx  # lazily imported: guaranteed present with any SDK/server
 
         try:
@@ -62,6 +111,8 @@ def _get_shared_http_client() -> httpx.AsyncClient:
                 timeout=httpx.Timeout(60.0, connect=5.0),
             )
         _SHARED_HTTP_CLIENT = client
+        _SHARED_HTTP_CLIENT_LOOP = current
+
     return _SHARED_HTTP_CLIENT
 
 
@@ -357,9 +408,7 @@ class LLMRouter:
                 return short_circuit
 
             started = time.perf_counter()
-            deadline = (
-                started + self._total_timeout if self._total_timeout is not None else None
-            )
+            deadline = started + self._total_timeout if self._total_timeout is not None else None
 
             attempt = 0
 
@@ -431,6 +480,18 @@ class LLMRouter:
                     self.metrics.incr(f"cancelled.{op}")
                     raise
 
+                except asyncio.TimeoutError:
+                    # A total-deadline breach: either ``wait_for`` tripped (it is
+                    # always given the *remaining total* budget) or the
+                    # ``remaining <= 0`` guard raised. No retry budget remains, so
+                    # record it as a hard total timeout and stop. Catching this
+                    # here (ahead of the generic retry handler below) keeps
+                    # timeout statistics accurate instead of letting a stray
+                    # near-instant cancellation be mis-counted as a muddy
+                    # ``errors.<op>`` retry.
+                    self.metrics.incr(f"errors.{op}.total_timeout")
+                    raise
+
                 except Exception as raw_exc:
                     exc = raw_exc
 
@@ -447,9 +508,7 @@ class LLMRouter:
                             # but keep the full failure sequence attached for
                             # actionable debugging.
                             retryable = [
-                                e
-                                for e in raw_exc.errors
-                                if isinstance(e, RETRYABLE_EXCEPTIONS)
+                                e for e in raw_exc.errors if isinstance(e, RETRYABLE_EXCEPTIONS)
                             ]
                             exc = retryable[-1] if retryable else raw_exc.errors[-1]
                             with suppress(AttributeError):
@@ -810,9 +869,7 @@ class LLMRouter:
         providers = []
         for item in cascade:
             if ":" not in item:
-                raise ValueError(
-                    f"Cascade item {item!r} must be formatted as 'provider:api_key'."
-                )
+                raise ValueError(f"Cascade item {item!r} must be formatted as 'provider:api_key'.")
 
             provider_name, api_key = item.split(":", 1)
             client = (
@@ -826,9 +883,7 @@ class LLMRouter:
                 client=client,
             )
             node = ClientNode(api_key=api_key, client=adapter)
-            providers.append(
-                ProviderRouter(name=provider_name, clients=[node])
-            )
+            providers.append(ProviderRouter(name=provider_name, clients=[node]))
 
         composite = CompositeRouter(providers)
         return cls(composite_router=composite)

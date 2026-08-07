@@ -98,9 +98,7 @@ class RouterFactory:
         except ImportError:  # pragma: no cover - langfuse not installed
             pass
         else:
-            if is_configured() and not any(
-                type(m) is LangfuseMiddleware for m in middleware
-            ):
+            if is_configured() and not any(type(m) is LangfuseMiddleware for m in middleware):
                 middleware.append(LangfuseMiddleware())
 
         # Circuit breaking is handled per key inside ClientNode so that one

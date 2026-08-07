@@ -83,9 +83,7 @@ def translate_sdk_error(exc: Exception) -> Exception:
     ``_SDK_ERROR_PATHS``). Anything else is returned unchanged rather than
     guessed at from its class name.
     """
-    if isinstance(
-        exc, (HTTPError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError)
-    ):
+    if isinstance(exc, (HTTPError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError)):
         return exc
 
     status_code = getattr(exc, "status_code", None)
@@ -262,6 +260,31 @@ class BaseProviderAdapter(ABC):
         return str(response) if response is not None else ""
 
     @staticmethod
+    def _extract_usage_tokens(usage: Any) -> tuple[int, int]:
+        """
+        Safely read ``(prompt_tokens, completion_tokens)`` from a provider usage
+        block.
+
+        Works whether the usage object exposes attributes or mapping keys, and
+        tolerates missing / malformed fields by defaulting to ``0``. A malformed
+        usage block therefore degrades token accounting gracefully instead of
+        raising mid-stream.
+        """
+        if usage is None:
+            return 0, 0
+
+        def _get(field: str) -> int:
+            value = getattr(usage, field, None)
+            if value is None:
+                value = usage.get(field, 0) if isinstance(usage, dict) else 0
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return _get("prompt_tokens"), _get("completion_tokens")
+
+    @staticmethod
     def _record_usage(
         context: RequestContext | None,
         response: Any,
@@ -280,17 +303,13 @@ class BaseProviderAdapter(ABC):
         if usage is None:
             return
 
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-
-        if prompt_tokens is None and completion_tokens is None:
-            return
+        prompt_tokens, completion_tokens = BaseProviderAdapter._extract_usage_tokens(usage)
 
         context.set(
             "usage",
             {
-                "prompt_tokens": prompt_tokens or 0,
-                "completion_tokens": completion_tokens or 0,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
             },
         )
 

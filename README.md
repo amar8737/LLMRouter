@@ -93,12 +93,11 @@ from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
+
 async def main():
     # Create an OpenAI client and wrap it in the OpenAI adapter
     sdk_client = AsyncOpenAI(api_key="sk-your-key-here")
-    adapter = AdapterFactory.create(
-        provider="openai", client=sdk_client, default_model="gpt-4"
-    )
+    adapter = AdapterFactory.create(provider="openai", client=sdk_client, default_model="gpt-4")
 
     # Wrap it in a ClientNode (tracks identity and health)
     node = ClientNode("sk-your-key-here", adapter)
@@ -115,6 +114,7 @@ async def main():
     # Make a request
     response = await router.chat(prompt="Hello, what's 2+2?")
     print(response)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -140,6 +140,7 @@ from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
+
 async def main():
     # Wrap the SDK client in adapter + ClientNode
     client = AsyncOpenAI(api_key="sk-...")
@@ -152,6 +153,7 @@ async def main():
 
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -169,10 +171,16 @@ from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
+
 async def main():
     keys = ["sk-key1", "sk-key2", "sk-key3"]
     nodes = [
-        ClientNode(key, AdapterFactory.create(provider="openai", client=AsyncOpenAI(api_key=key), default_model="gpt-4"))
+        ClientNode(
+            key,
+            AdapterFactory.create(
+                provider="openai", client=AsyncOpenAI(api_key=key), default_model="gpt-4"
+            ),
+        )
         for key in keys
     ]
 
@@ -183,6 +191,7 @@ async def main():
 
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -201,6 +210,7 @@ from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
+
 async def main():
     def node(provider, sdk, key):
         adapter = AdapterFactory.create(provider=provider, client=sdk, default_model="gpt-4")
@@ -208,13 +218,15 @@ async def main():
 
     # Primary: OpenAI
     openai_provider = ProviderRouter(
-        "openai", [node("openai", AsyncOpenAI(api_key="sk-..."), "sk-...")],
+        "openai",
+        [node("openai", AsyncOpenAI(api_key="sk-..."), "sk-...")],
         scheduler=LeastBusyScheduler(),
     )
 
     # Fallback: Groq
     groq_provider = ProviderRouter(
-        "groq", [node("groq", AsyncGroq(api_key="gsk-..."), "gsk-...")],
+        "groq",
+        [node("groq", AsyncGroq(api_key="gsk-..."), "gsk-...")],
         scheduler=LeastBusyScheduler(),
     )
 
@@ -225,6 +237,7 @@ async def main():
     # If OpenAI fails, automatically falls back to Groq
     response = await router.chat(prompt="Hello!")
     print(response)
+
 
 asyncio.run(main())
 ```
@@ -561,7 +574,7 @@ and the router records it as global and per-provider counters:
 
 ```python
 m = router.metrics.get()
-print(m["counters"]["tokens.prompt.total"])            # global
+print(m["counters"]["tokens.prompt.total"])  # global
 print(m["labeled_counters"]["tokens.total"]["provider=openai"])  # per-provider
 print(m["counters"]["tokens.completion.total"])
 ```
@@ -781,7 +794,7 @@ Configs can be written as JSON and loaded with `RouterConfig.from_file` /
 from llmrouterx.config import RouterConfig
 from llmrouterx.router.factory import RouterFactory
 
-config = RouterConfig.from_file("router.json")   # resolves keys automatically
+config = RouterConfig.from_file("router.json")  # resolves keys automatically
 router = RouterFactory.build(config)
 ```
 

@@ -101,9 +101,9 @@ The gateway is a normal FastAPI app via the `create_app` factory:
 from fastapi import FastAPI
 from llmrouterx.server.app import create_app
 
-app = create_app(config_path="router.json")   # build from file
+app = create_app(config_path="router.json")  # build from file
 # or
-app = create_app(router=my_existing_router)    # embed an existing router
+app = create_app(router=my_existing_router)  # embed an existing router
 ```
 
 ---
@@ -145,7 +145,7 @@ Load it in code with `RouterConfig.from_file` / `from_dict`:
 from llmrouterx.config import RouterConfig
 from llmrouterx.router.factory import RouterFactory
 
-config = RouterConfig.from_file("router.json")   # resolves keys automatically
+config = RouterConfig.from_file("router.json")  # resolves keys automatically
 router = RouterFactory.build(config)
 ```
 
@@ -176,7 +176,7 @@ under `api_key`. If no source is present, or an env var/file is missing, a
 ```python
 from llmrouterx.config.secrets import resolve_key, KeyResolutionError
 
-key = resolve_key({"api_key_env": "OPENAI_API_KEY"})   # reads the env var
+key = resolve_key({"api_key_env": "OPENAI_API_KEY"})  # reads the env var
 ```
 
 This keeps secrets out of config files and works with container secrets
@@ -276,8 +276,8 @@ from llmrouterx.exceptions import NoHealthyClientError
 try:
     response = await router.chat(prompt="Hello")
 except NoHealthyClientError as exc:
-    print(exc)          # includes the Failure sequence block
-    print(exc.errors)   # list of (provider, api_key, error) tuples
+    print(exc)  # includes the Failure sequence block
+    print(exc.errors)  # list of (provider, api_key, error) tuples
 ```
 
 ---
