@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..exceptions import ConfigurationError
 from .base import (
@@ -9,6 +9,9 @@ from .base import (
     translate_async_errors,
     translate_stream_errors,
 )
+
+if TYPE_CHECKING:
+    from ..context.request_context import RequestContext
 
 
 class AnthropicAdapter(BaseProviderAdapter):
@@ -47,6 +50,7 @@ class AnthropicAdapter(BaseProviderAdapter):
         prompt: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> str:
 
@@ -63,13 +67,15 @@ class AnthropicAdapter(BaseProviderAdapter):
             **kwargs,
         )
 
+        self._record_usage(context, response)
+
         blocks = getattr(response, "content", None) or []
 
         return "".join(
             block.text
             for block in blocks
             if getattr(block, "type", None) == "text" and getattr(block, "text", None)
-        )
+        ) or ""
 
     @translate_stream_errors
     async def stream(
@@ -77,6 +83,7 @@ class AnthropicAdapter(BaseProviderAdapter):
         prompt: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
 
@@ -105,11 +112,13 @@ class AnthropicAdapter(BaseProviderAdapter):
             if token:
                 yield token
 
+    @translate_async_errors
     async def embeddings(
         self,
         text: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> list[float]:
 

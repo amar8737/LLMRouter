@@ -38,6 +38,12 @@ response = await router.chat(prompt="Hello!")
 - 🔁 **Retry Middleware Hook** — `on_retry` lets middleware veto individual retries
 - 📝 **Structured Logging** — Built-in JSON formatter for machine-readable logs
 - 🛡️ **Error Handling** — Graceful degradation with meaningful exceptions
+- 🔐 **Gateway Auth** — optional bearer-token tiers (admin for `/dashboard`+`/metrics`, API key for `/v1/*`) via `create_app(..., admin_token=, api_keys=)` or env/CLI
+- 🖥️ **HTTP Gateway** — OpenAI-compatible server (`/v1/chat/completions`, streaming, health, metrics, dashboard)
+- 📄 **Declarative Config** — JSON config files with env/file-based key loading (`api_key_env` / `api_key_file`)
+- 🔭 **Langfuse Tracing** — Zero-code observability via middleware
+- 📊 **Dashboard & Token Tracking** — zero-config UI plus global/per-provider token counters
+- 🛠️ **Actionable Errors** — `NoHealthyClientError` reports the full `Failure sequence` across providers
 
 ### Planned Features (v0.2+)
 - 💰 Cost-aware routing (pick cheapest provider)
@@ -712,7 +718,95 @@ Supported environment variables:
 | `LLMROUTER_CIRCUIT_BREAKER` | `true` | Enable per-key circuit breakers |
 | `LLMROUTER_CB_THRESHOLD` | `5` | Failures before a key opens |
 | `LLMROUTER_CB_RESET_TIMEOUT` | `30` | Cooldown before a key is retried |
+
+### Loading Config from a JSON File
+
+Configs can be written as JSON and loaded with `RouterConfig.from_file` /
+`from_dict`. Keys are resolved automatically (see below).
+
+```python
+from llmrouterx.config import RouterConfig
+from llmrouterx.router.factory import RouterFactory
+
+config = RouterConfig.from_file("router.json")   # resolves keys automatically
+router = RouterFactory.build(config)
 ```
+
+```json
+{
+  "providers": [
+    {
+      "name": "openai",
+      "clients": [
+        { "client": "openai", "api_key_env": "OPENAI_API_KEY", "default_model": "gpt-4o" }
+      ]
+    }
+  ],
+  "max_retries": 3,
+  "total_timeout": 30.0
+}
+```
+
+### Loading API Keys
+
+A client's key can come from a literal value, an environment variable, or a
+file (secrets). Precedence is `api_key` > `api_key_env` > `api_key_file`:
+
+```json
+{ "client": "openai", "api_key_env": "OPENAI_API_KEY" }
+{ "client": "openai", "api_key_file": "/run/secrets/openai-key" }
+{ "client": "openai", "api_key": "sk-plaintext-..." }
+```
+
+`from_file`/`from_dict` resolve these to the literal key immediately. If no
+source is present or the env var/file is missing, a `KeyResolutionError` is
+raised. This keeps secrets out of config files and works with container
+secrets and CI/CD environments.
+
+---
+
+## 🌐 HTTP Gateway (Server)
+
+The `server` extra provides an OpenAI-compatible HTTP gateway and a CLI to run
+it, plus declarative config and key loading:
+
+```bash
+pip install llmrouterx[server]
+llmrouterx serve --config router.json --port 8000
+```
+
+Endpoints: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`
+(streaming and non-streaming), `GET /metrics`. Errors use the OpenAI-compatible
+`{"error": {"message", "type", "code"}}` envelope.
+
+See [docs/SERVER.md](docs/SERVER.md) for the full guide.
+
+---
+
+## 🔭 Observability (Langfuse)
+
+The `langfuse` extra records every routed operation as a Langfuse trace through
+the router middleware — no routing code changes needed:
+
+```bash
+pip install llmrouterx[langfuse]
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+export LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+Tracing activates automatically when those variables are present (or via
+`LangfuseMiddleware` in a `RouterConfig.middleware` list). Each
+`chat`/`stream`/`embeddings` call becomes a Langfuse `generation` — its own
+auto-created trace — with input, output, model, provider, masked key suffix,
+retry count, latency, and `ERROR` levels on failures. Tracing is fail-open and
+never interrupts routing. The gateway flushes pending traces on clean shutdown.
+See [docs/SERVER.md](docs/SERVER.md#4-langfuse-tracing).
+
+`GET /dashboard` serves a zero-config auto-refreshing observability UI, and the
+`MetricsCollector` exposes global + per-provider token counters
+(`tokens.prompt.total`, `tokens.completion.total`, `tokens.total`). See
+[docs/SERVER.md](docs/SERVER.md#5-observability-errors--token-tracking).
 
 ---
 
@@ -720,7 +814,7 @@ Supported environment variables:
 
 | Problem | Solution |
 |---------|----------|
-| "No healthy providers" | Check if providers are up, verify API keys are valid |
+| "No healthy providers" | Check the `Failure sequence` in the `NoHealthyClientError` message to see each failing provider/key and its underlying error |
 | Requests are slow | Use `LeastBusyScheduler`, check metrics for latency outliers |
 | Same key always used | Check that scheduler is set to `RoundRobin` or `LeastBusy` |
 | Errors not retrying | Check `should_retry()` logic in retry policy, some errors are permanent |

@@ -108,20 +108,29 @@ class CircuitBreaker:
             return max(0.0, remaining)
 
     def allow_request(self) -> bool:
-        self.maybe_advance()
+        # Perform the OPEN -> HALF_OPEN transition and the gated decision
+        # atomically under a single lock so a failure recorded by a concurrent
+        # waiter cannot reopen the breaker between the transition check and the
+        # slot allocation (TOCTOU).
+        with self._lock:
+            if (
+                self._state == CircuitState.OPEN
+                and time.monotonic() - self._last_failure_time >= self._reset_timeout
+            ):
+                self._state = CircuitState.HALF_OPEN
+                self._half_open_calls = 0
+                logger.info("Circuit breaker transitioning to HALF_OPEN")
 
-        current = self.state
-        if current == CircuitState.CLOSED:
-            return True
+            if self._state == CircuitState.CLOSED:
+                return True
 
-        if current == CircuitState.HALF_OPEN:
-            with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
                 if self._half_open_calls < self._half_open_max_calls:
                     self._half_open_calls += 1
                     return True
-            return False
+                return False
 
-        return False
+            return False
 
     def record_success(self) -> None:
         with self._lock:

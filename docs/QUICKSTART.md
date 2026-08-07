@@ -278,6 +278,99 @@ provider = ProviderRouter(
 
 ---
 
+## 11. Declarative Config + HTTP Gateway
+
+Run an OpenAI-compatible server from a JSON config (no Python needed):
+
+```bash
+pip install llmrouterx[server]
+
+# router.json
+cat > router.json <<'EOF'
+{
+  "providers": [
+    {
+      "name": "openai",
+      "clients": [
+        { "client": "openai", "api_key_env": "OPENAI_API_KEY", "default_model": "gpt-4o" }
+      ]
+    }
+  ]
+}
+EOF
+
+llmrouterx serve --config router.json --port 8000
+```
+
+```bash
+curl -X POST localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Or load the config in code:
+
+```python
+from llmrouterx.config import RouterConfig
+from llmrouterx.router.factory import RouterFactory
+
+config = RouterConfig.from_file("router.json")   # resolves keys automatically
+router = RouterFactory.build(config)
+```
+
+Keys can be a literal (`api_key`), an environment variable (`api_key_env`), or
+a file (`api_key_file`), so secrets stay out of config. See
+[SERVER.md](SERVER.md).
+
+---
+
+## 12. Quick-Start Fallback Chain
+
+```python
+from llmrouterx import LLMRouter
+
+router = LLMRouter.from_cascade([
+    "openai:sk-...",
+    "anthropic:sk-ant-...",
+    "groq:gsk-...",
+])
+```
+
+Each `"provider:api_key"` becomes a fallback provider in order. The default
+client is `AsyncOpenAI` (OpenAI-compatible providers) / `AsyncAnthropic`
+(`anthropic`); pass `client_factory(provider, api_key)` to customize.
+
+---
+
+## 13. Langfuse Tracing
+
+```bash
+pip install llmrouterx[langfuse]
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+export LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+Tracing is enabled automatically when those variables are present — no code
+change. Each request is recorded as a Langfuse generation.
+
+```python
+import asyncio
+from llmrouterx import LLMRouter
+
+
+async def main():
+    # No extra setup needed; the env vars above activate tracing.
+    response = await router.chat(prompt="Hello, trace me!")
+
+
+asyncio.run(main())
+```
+
+See [SERVER.md](SERVER.md#4-langfuse-tracing).
+
+---
+
 ## Common Patterns
 
 ### Stream responses
@@ -299,6 +392,32 @@ for provider in composite.providers:
 
 ```python
 embeddings = await router.embeddings(text="Hello world")
+```
+
+### Track tokens from provider usage
+
+```python
+from llmrouterx.metrics import MetricsCollector
+
+metrics = MetricsCollector()
+# from a provider response's usage block:
+metrics.track_tokens("openai", prompt_tokens=120, completion_tokens=45)
+snapshot = metrics.snapshot()["counters"]
+snapshot["tokens.prompt.total"]          # global prompt tokens
+snapshot["tokens.total{provider=openai}"]  # per-provider total
+```
+
+### Handle multi-provider failures
+
+```python
+from llmrouterx.exceptions import NoHealthyClientError
+
+try:
+    response = await router.chat(prompt="Hello")
+except NoHealthyClientError as exc:
+    print(exc)          # message includes the "Failure sequence" block
+    for provider, api_key, error in exc.errors:
+        print(provider, api_key, error)
 ```
 
 ### Custom provider response handling
@@ -355,4 +474,6 @@ async def test_chat():
 2. ✅ Replace API keys with real ones
 3. ✅ Run it: `python3 your_script.py`
 4. ✅ Check metrics: `router.metrics.get()`
-5. ✅ Read full [README.md](README.md) for more details
+5. ✅ Run the HTTP gateway: `llmrouterx serve --config router.json`
+6. ✅ Enable tracing: set `LANGFUSE_*` env vars
+7. ✅ Read full [README.md](README.md) for more details

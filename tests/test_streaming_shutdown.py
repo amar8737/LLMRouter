@@ -239,13 +239,29 @@ def test_translate_sdk_error_maps_status_code():
     assert translated.headers == {"Retry-After": "5"}
 
 
-def test_translate_sdk_error_maps_connection_by_name():
+class FakeConnError(Exception):
+    """A resolvable stand-in for a provider-SDK connection error."""
+
+
+def test_translate_sdk_error_maps_registered_connection_type(monkeypatch):
+    path = f"{FakeConnError.__module__}.FakeConnError"
+    monkeypatch.setattr("llmrouterx.adapters.base._SDK_ERROR_PATHS", {503: (path,)})
+    monkeypatch.setattr("llmrouterx.adapters.base._RESOLVED_SDK_TYPES", {})
+    translated = translate_sdk_error(FakeConnError("boom"))
+    assert isinstance(translated, HTTPError)
+    assert translated.status_code == 503
+
+
+def test_translate_sdk_error_ignores_misleading_name(monkeypatch):
+    # An unrelated exception whose *name* contains "connection" is NOT mapped,
+    # because classification is type-based, not name-based.
+    monkeypatch.setattr("llmrouterx.adapters.base._SDK_ERROR_PATHS", {})
+
     class APIConnectionError(Exception):
         pass
 
-    translated = translate_sdk_error(APIConnectionError("boom"))
-    assert isinstance(translated, HTTPError)
-    assert translated.status_code == 503
+    err = APIConnectionError("not really an SDK error")
+    assert translate_sdk_error(err) is err
 
 
 def test_translate_sdk_error_passes_through_native():

@@ -7,9 +7,27 @@ OpenAI-compatible HTTP gateway backed by Uvicorn.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from typing import Any
+
+
+def _use_uvloop() -> bool:
+    """Install uvloop as the event-loop policy where available.
+
+    Returns True when uvloop is in use, False when falling back to the
+    standard asyncio loop (e.g. platform lacks uvloop support).
+    """
+    try:
+        import uvloop  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    try:
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        return True
+    except Exception:  # pragma: no cover - uvloop unsupported at runtime
+        return False
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,6 +55,24 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["debug", "info", "warning", "error", "critical"],
         help="Logging verbosity",
     )
+    serve.add_argument(
+        "--admin-token",
+        type=str,
+        default=None,
+        help="Bearer token required on /dashboard and /metrics (also LLMROUTER_ADMIN_TOKEN)",
+    )
+    serve.add_argument(
+        "--api-key",
+        type=str,
+        action="append",
+        default=None,
+        help="Bearer key accepted on /v1/* (repeatable; also LLMROUTER_API_KEYS, comma-separated)",
+    )
+    serve.add_argument(
+        "--no-docs",
+        action="store_true",
+        help="Disable interactive OpenAPI docs (also LLMROUTER_DOCS=0)",
+    )
 
     return parser
 
@@ -57,6 +93,11 @@ def _run_serve(args: argparse.Namespace) -> None:
         print("Please install server extras: pip install llmrouterx[server]", file=sys.stderr)
         sys.exit(1)
 
+    if _use_uvloop():
+        logging.getLogger("llmrouterx.cli").info("Using uvloop event loop.")
+    else:
+        logging.getLogger("llmrouterx.cli").info("Using the standard asyncio event loop.")
+
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     # Multi-worker mode needs the app factory as an import string, so it cannot
@@ -72,7 +113,12 @@ def _run_serve(args: argparse.Namespace) -> None:
 
         from llmrouterx.server.app import create_app
 
-        app: Any = create_app(config_path=args.config)
+        app: Any = create_app(
+            config_path=args.config,
+            admin_token=args.admin_token,
+            api_keys=args.api_key,
+            docs_enabled=not args.no_docs,
+        )
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
         return
 

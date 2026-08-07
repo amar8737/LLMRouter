@@ -95,6 +95,37 @@ class MetricsCollector:
                 self._labeled_timings[key][label_key].append(seconds)
 
     # -------------------------------------------------------
+    # Token tracking
+    # -------------------------------------------------------
+
+    def track_tokens(
+        self,
+        provider: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        """
+        Record token usage for economic/cost tracking.
+
+        Usage is separated from request counts: global counters track
+        ``tokens.prompt.total`` / ``tokens.completion.total``, and a per-provider
+        ``tokens.total`` labeled counter enables cost attribution.
+        """
+        with self._lock:
+            self._counters["tokens.prompt.total"] = (
+                self._counters.get("tokens.prompt.total", 0) + prompt_tokens
+            )
+            self._counters["tokens.completion.total"] = (
+                self._counters.get("tokens.completion.total", 0) + completion_tokens
+            )
+
+            label_key = _serialize_labels({"provider": provider})
+            bucket = self._labeled_counters["tokens.total"]
+            bucket[label_key] = (
+                bucket.get(label_key, 0) + prompt_tokens + completion_tokens
+            )
+
+    # -------------------------------------------------------
     # Snapshot
     # -------------------------------------------------------
 

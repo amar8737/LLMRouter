@@ -42,7 +42,8 @@ server = [
 	"fastapi>=0.100.0",
 	"uvicorn>=0.23.0",
 	"pydantic>=2.0.0",
-	"httpx>=0.24.0",
+	"httpx[http2]>=0.24.0",
+	"uvloop>=0.17.0; platform_system != 'Windows'",
 ]
 
 [project.scripts]

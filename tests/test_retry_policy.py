@@ -3,7 +3,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from llmrouterx.client.client_node import ClientNode
+from llmrouterx.providers.composite_router import CompositeRouter
+from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.retry.exponential import ExponentialRetry, HTTPError
+from llmrouterx.router.llmrouter import LLMRouter
 
 
 @pytest.fixture
@@ -31,7 +35,44 @@ def test_should_retry_rejects_plain_exceptions(retry):
 
 
 def test_should_retry_respects_max_retries(retry):
-    assert retry.should_retry(HTTPError(500, "x"), attempt=3) is False
+    # max_retries=3 means 3 retries are allowed after the initial failure:
+    # attempts 1..3 are retried, attempt 4 is not.
+    assert retry.should_retry(HTTPError(500, "x"), attempt=3) is True
+    assert retry.should_retry(HTTPError(500, "x"), attempt=4) is False
+
+
+def test_retry_performs_exactly_max_retries():
+    # max_retries=2 -> initial call + 2 retries = 3 total calls, then gives up.
+    seen = []
+
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, prompt, **kwargs):
+            self.calls += 1
+            seen.append(self.calls)
+            raise HTTPError(500, "x")
+
+        async def embeddings(self, text, **kwargs):
+            raise NotImplementedError
+
+        async def responses(self, *args, **kwargs):
+            raise NotImplementedError
+
+        async def stream(self, prompt, **kwargs):
+            raise NotImplementedError
+            yield  # pragma: no cover
+
+    client = Flaky()
+    node = ClientNode("k1", client)
+    router = LLMRouter(
+        CompositeRouter([ProviderRouter("p", [node])]),
+        retry=ExponentialRetry(max_retries=2, base=0.01, jitter=False),
+    )
+    with pytest.raises(HTTPError):
+        asyncio.run(router.chat("hi"))
+    assert client.calls == 3  # 1 initial + 2 retries
 
 
 def test_backoff_exponential_without_headers(retry):

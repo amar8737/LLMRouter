@@ -53,7 +53,7 @@ class CompositeRouter:
         **kwargs: Any,
     ) -> dict[str, Any]:
 
-        last_exception: Exception | None = None
+        exceptions: list[Exception] = []
 
         for provider in self.providers:
             provider_name = getattr(
@@ -88,7 +88,7 @@ class CompositeRouter:
                     provider_name,
                 )
 
-                last_exception = exc
+                exceptions.append(exc)
 
                 if self.metrics:
                     self.metrics.incr(f"provider.no_healthy.{provider_name}")
@@ -101,17 +101,20 @@ class CompositeRouter:
                     provider_name,
                 )
 
-                last_exception = exc
+                exceptions.append(exc)
 
                 if self.metrics:
                     self.metrics.incr(f"provider.error.{provider_name}")
 
                 continue
 
-        if last_exception is not None:
-            raise last_exception
-
-        raise NoHealthyClientError("No healthy providers available.")
+        # Surface the full failure sequence. If any underlying error is
+        # transient the router's retry policy unwraps it (see LLMRouter), so
+        # wrapping here does not prevent transient errors from being retried.
+        raise NoHealthyClientError(
+            "All providers failed to serve the request.",
+            errors=exceptions,
+        )
 
     async def health(
         self,

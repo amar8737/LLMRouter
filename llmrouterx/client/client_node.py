@@ -12,6 +12,7 @@ from ..exceptions import ConfigurationError
 from ..retry.circuit_breaker import CircuitBreaker, CircuitState
 from ..retry.exponential import ExponentialRetry, HTTPError
 from ..streaming.manager import StreamingManager
+from ..utils.masking import mask_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,8 @@ class ClientNode:
         payload: dict[str, Any],
         kwargs: dict[str, Any],
     ):
+        context = kwargs.pop("context", None)
+
         if op == "chat":
             if "prompt" not in payload:
                 raise ValueError("The 'chat' operation requires a 'prompt' field.")
@@ -323,6 +326,7 @@ class ClientNode:
             return self.client.chat(
                 payload["prompt"],
                 **self._merge(payload, "prompt", kwargs),
+                context=context,
             )
 
         if op == "embeddings":
@@ -332,12 +336,14 @@ class ClientNode:
             return self.client.embeddings(
                 payload["text"],
                 **self._merge(payload, "text", kwargs),
+                context=context,
             )
 
         if op == "responses":
             return self.client.responses(
                 *payload.get("args", ()),
                 **self._merge(payload, "args", kwargs),
+                context=context,
             )
 
         raise ValueError(
@@ -423,9 +429,4 @@ def _mask(api_key: str | None) -> str:
     """
     Render an API key safe for logs: keep the last 4 characters only.
     """
-    if not api_key:
-        return "<unset>"
-
-    text = str(api_key)
-
-    return text if len(text) <= 4 else f"...{text[-4:]}"
+    return mask_api_key(api_key)

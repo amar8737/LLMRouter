@@ -4,9 +4,66 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from functools import wraps
-from typing import Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 from ..retry.exponential import HTTPError
+
+if TYPE_CHECKING:
+    from ..context.request_context import RequestContext
+
+# ---------------------------------------------------------------------------
+# Strict provider-SDK error classification
+# ---------------------------------------------------------------------------
+# Known provider-SDK exception types, referenced by dotted ``module.Class``
+# path so that no SDK has to be installed for the router to work. Types are
+# resolved lazily on first use: if the module is not installed (or the class
+# no longer exists) that path is simply skipped. Matching is by actual type
+# (``isinstance``) rather than by class-name string, so an unrelated exception
+# whose name merely contains "timeout" or "connection" is never misclassified.
+_SDK_ERROR_PATHS: dict[int, tuple[str, ...]] = {
+    503: (
+        # Connection failures -> retryable upstream unavailability.
+        "openai.APIConnectionError",
+        "anthropic.APIConnectionError",
+        "groq.APIConnectionError",
+        "mistralai.APIConnectionError",
+        "together.APIConnectionError",
+        "google.genai.errors.ClientError",
+        "openai.APIRetryableError",
+        "anthropic.APIRetryableError",
+        "httpx.ConnectError",  # also matches httpx.ConnectTimeout (subclass)
+    ),
+    504: (
+        # Timeouts -> retryable gateway timeout.
+        "openai.APITimeoutError",
+        "anthropic.APITimeoutError",
+        "groq.APITimeoutError",
+        "mistralai.APITimeoutError",
+        "together.APITimeoutError",
+        "httpx.TimeoutException",
+        "httpx.ReadTimeout",
+    ),
+}
+
+_RESOLVED_SDK_TYPES: dict[int, tuple[type, ...]] = {}
+
+
+def _resolve_sdk_types(status: int) -> tuple[type, ...]:
+    """Resolve (and cache) the SDK exception types registered for ``status``."""
+    if status not in _RESOLVED_SDK_TYPES:
+        resolved: list[type] = []
+        for dotted in _SDK_ERROR_PATHS.get(status, ()):
+            module_name, _, class_name = dotted.rpartition(".")
+            try:
+                module = import_module(module_name)
+            except ImportError:  # SDK not installed
+                continue
+            exc_type = getattr(module, class_name, None)
+            if isinstance(exc_type, type):
+                resolved.append(exc_type)
+        _RESOLVED_SDK_TYPES[status] = tuple(resolved)
+    return _RESOLVED_SDK_TYPES[status]
 
 
 def translate_sdk_error(exc: Exception) -> Exception:
@@ -22,9 +79,13 @@ def translate_sdk_error(exc: Exception) -> Exception:
     Connection and timeout errors that are not builtin ``ConnectionError`` /
     ``asyncio.TimeoutError`` subclasses (for example OpenAI's
     ``APIConnectionError`` / ``APITimeoutError``) are mapped to a retryable
-    status so the retry policy treats them as transient.
+    status *only* when they are a known SDK exception type (see
+    ``_SDK_ERROR_PATHS``). Anything else is returned unchanged rather than
+    guessed at from its class name.
     """
-    if isinstance(exc, (HTTPError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError)):
+    if isinstance(
+        exc, (HTTPError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError)
+    ):
         return exc
 
     status_code = getattr(exc, "status_code", None)
@@ -32,12 +93,9 @@ def translate_sdk_error(exc: Exception) -> Exception:
         headers = getattr(exc, "headers", None) or {}
         return HTTPError(status_code, str(exc), headers=headers)
 
-    name = type(exc).__name__.lower()
-    if "connection" in name or "connect" in name:
-        return HTTPError(503, str(exc))
-
-    if "timeout" in name or "timedout" in name or "timed_out" in name:
-        return HTTPError(504, str(exc))
+    for status in _SDK_ERROR_PATHS:
+        if isinstance(exc, _resolve_sdk_types(status)):
+            return HTTPError(status, str(exc))
 
     return exc
 
@@ -122,6 +180,7 @@ class BaseProviderAdapter(ABC):
         prompt: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> str:
         """
@@ -135,6 +194,7 @@ class BaseProviderAdapter(ABC):
         prompt: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
         """
@@ -148,6 +208,7 @@ class BaseProviderAdapter(ABC):
         text: str,
         *,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> list[float]:
         """
@@ -159,6 +220,7 @@ class BaseProviderAdapter(ABC):
         self,
         *args: Any,
         model: str | None = None,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -178,6 +240,59 @@ class BaseProviderAdapter(ABC):
         an API ping or model listing.
         """
         return True
+
+    @staticmethod
+    def _extract_text(response: Any) -> str:
+        """
+        Normalize a provider response to its text content.
+
+        Tries, in order: ``output_text`` (OpenAI Responses-style), then
+        ``choices[0].message.content`` (chat-style), then ``str`` as a
+        last resort. Missing content becomes the empty string rather than
+        ``None``.
+        """
+        text = getattr(response, "output_text", None)
+        if text:
+            return str(text)
+        choices = getattr(response, "choices", None)
+        if choices:
+            content = getattr(getattr(choices[0], "message", None), "content", None)
+            if content:
+                return str(content)
+        return str(response) if response is not None else ""
+
+    @staticmethod
+    def _record_usage(
+        context: RequestContext | None,
+        response: Any,
+    ) -> None:
+        """
+        Extract token usage from a provider response and attach it to the
+        request context for later metric recording.
+
+        Providers expose usage differently (``response.usage`` on OpenAI-style
+        clients, ``response.usage`` on Anthropic). Anything else is ignored.
+        """
+        if context is None:
+            return
+
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+
+        if prompt_tokens is None and completion_tokens is None:
+            return
+
+        context.set(
+            "usage",
+            {
+                "prompt_tokens": prompt_tokens or 0,
+                "completion_tokens": completion_tokens or 0,
+            },
+        )
 
     @property
     def provider_name(self) -> str:

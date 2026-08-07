@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ..exceptions import NoHealthyClientError
+from ..utils.masking import mask_api_key
 
 if TYPE_CHECKING:
     from ..context.request_context import RequestContext
@@ -38,7 +39,7 @@ class ProviderRouter:
             except Exception:
                 logger.exception(
                     "Health check failed for client %s",
-                    getattr(client, "api_key", "<unknown>"),
+                    mask_api_key(getattr(client, "api_key", None)),
                 )
         return False
 
@@ -91,7 +92,7 @@ class ProviderRouter:
                     last_exception = exc
                     logger.warning(
                         "Client '%s' failed (attempt %d/%d): %s",
-                        getattr(client, "api_key", "<unknown>"),
+                        mask_api_key(getattr(client, "api_key", None)),
                         attempt + 1,
                         max_scheduler_retries,
                         str(exc),
@@ -116,7 +117,7 @@ class ProviderRouter:
                 last_exception = exc
                 logger.warning(
                     "Client '%s' failed: %s",
-                    getattr(client, "api_key", "<unknown>"),
+                    mask_api_key(getattr(client, "api_key", None)),
                     str(exc),
                 )
 
@@ -134,7 +135,7 @@ class ProviderRouter:
         kwargs: dict[str, Any],
     ) -> Any:
         """Send to a client and record attribution for the request context."""
-        result = await client.send(op, payload, **kwargs)
+        result = await client.send(op, payload, context=context, **kwargs)
         self.last_api_key = getattr(client, "api_key", None)
         if context is not None:
             context.api_key = self.last_api_key
@@ -170,7 +171,7 @@ class ProviderRouter:
                     raise
                 logger.exception(
                     "Stream failed before first token for client %s",
-                    getattr(client, "api_key", "<unknown>"),
+                    mask_api_key(getattr(client, "api_key", None)),
                 )
                 continue
 

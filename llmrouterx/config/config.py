@@ -8,6 +8,20 @@ from typing import Any
 from .secrets import resolve_key
 
 
+def _parse_bool(value: Any, default: bool = True) -> bool:
+    """
+    Parse a bool from a JSON value or an env/var string.
+
+    Accepts ``True``/``False`` directly, and the strings ``"true"``/``"false"``
+    (case-insensitive). ``None`` yields ``default`` so the field stays optional.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
 @dataclass(slots=True)
 class RouterConfig:
     """
@@ -63,8 +77,8 @@ class RouterConfig:
                 int(os.getenv("LLMROUTER_MAX_CONCURRENT_REQUESTS", "0")) or None
             ),
             total_timeout=(float(os.getenv("LLMROUTER_TOTAL_TIMEOUT", "0")) or None),
-            enable_circuit_breaker=(
-                os.getenv("LLMROUTER_CIRCUIT_BREAKER", "true").lower() != "false"
+            enable_circuit_breaker=_parse_bool(
+                os.getenv("LLMROUTER_CIRCUIT_BREAKER", "true")
             ),
             circuit_breaker_threshold=int(os.getenv("LLMROUTER_CB_THRESHOLD", "5")),
             circuit_breaker_reset_timeout=float(os.getenv("LLMROUTER_CB_RESET_TIMEOUT", "30")),
@@ -130,7 +144,7 @@ class RouterConfig:
             total_timeout=(
                 float(data["total_timeout"]) if data.get("total_timeout") else None
             ),
-            enable_circuit_breaker=bool(data.get("enable_circuit_breaker", True)),
+            enable_circuit_breaker=_parse_bool(data.get("enable_circuit_breaker", True)),
             circuit_breaker_threshold=int(data.get("circuit_breaker_threshold", 5)),
             circuit_breaker_reset_timeout=float(
                 data.get("circuit_breaker_reset_timeout", 30.0)
@@ -179,6 +193,16 @@ class RouterConfig:
                 raise ValueError("Each provider dict must have a 'name' key.")
             if "clients" not in provider or not provider["clients"]:
                 raise ValueError(f"Provider '{provider['name']}' must have at least one client.")
+            for client in provider["clients"]:
+                if not isinstance(client, dict):
+                    raise ValueError(
+                        f"Provider '{provider['name']}' has a non-dict client."
+                    )
+                if "client" not in client:
+                    raise ValueError(
+                        f"Provider '{provider['name']}' has a client without a "
+                        f"'client' field."
+                    )
 
     def copy(self, **updates: Any) -> RouterConfig:
         values = {

@@ -6,6 +6,14 @@ from llmrouterx.adapters.openai_compatible import OpenAICompatibleAdapter
 from llmrouterx.retry.exponential import HTTPError
 
 
+class ConnFailure(Exception):
+    """Module-level stand-in for a provider-SDK connection error."""
+
+
+class TimeoutFailure(Exception):
+    """Module-level stand-in for a provider-SDK timeout error."""
+
+
 @pytest.fixture
 def adapter(openai_client):
     return OpenAICompatibleAdapter(client=openai_client, default_model="gpt-4")
@@ -151,7 +159,7 @@ async def test_responses_api_used_when_available(adapter, openai_client):
     openai_client.set_handler(handler)
     result = await adapter.responses("arg1", model="gpt-5")
     assert captured["model"] == "gpt-5"
-    assert result.choices[0].message.content == "responses-ok"
+    assert result == "responses-ok"
 
 
 @pytest.mark.asyncio
@@ -191,12 +199,13 @@ async def test_sdk_error_translated_on_chat(adapter, openai_client):
 
 
 @pytest.mark.asyncio
-async def test_connection_error_name_mapped(adapter, openai_client):
-    class APIConnectionError(Exception):
-        pass
+async def test_connection_error_mapped_by_registered_type(adapter, openai_client, monkeypatch):
+    path = f"{ConnFailure.__module__}.ConnFailure"
+    monkeypatch.setattr("llmrouterx.adapters.base._SDK_ERROR_PATHS", {503: (path,)})
+    monkeypatch.setattr("llmrouterx.adapters.base._RESOLVED_SDK_TYPES", {})
 
     async def handler(op, kwargs):
-        raise APIConnectionError("connection failed")
+        raise ConnFailure("connection failed")
 
     openai_client.set_handler(handler)
     with pytest.raises(HTTPError) as excinfo:
@@ -205,17 +214,35 @@ async def test_connection_error_name_mapped(adapter, openai_client):
 
 
 @pytest.mark.asyncio
-async def test_timeout_error_name_mapped(adapter, openai_client):
-    class APITimeoutError(Exception):
-        pass
+async def test_timeout_mapped_by_registered_type(adapter, openai_client, monkeypatch):
+    path = f"{TimeoutFailure.__module__}.TimeoutFailure"
+    monkeypatch.setattr("llmrouterx.adapters.base._SDK_ERROR_PATHS", {504: (path,)})
+    monkeypatch.setattr("llmrouterx.adapters.base._RESOLVED_SDK_TYPES", {})
 
     async def handler(op, kwargs):
-        raise APITimeoutError("timed out")
+        raise TimeoutFailure("timed out")
 
     openai_client.set_handler(handler)
     with pytest.raises(HTTPError) as excinfo:
         await adapter.chat("hi")
     assert excinfo.value.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_unregistered_sdk_error_passes_through(adapter, openai_client, monkeypatch):
+    # A raised exception that is NOT a registered SDK type must not be
+    # translated to HTTPError, even if its name looks connection-like.
+    monkeypatch.setattr("llmrouterx.adapters.base._SDK_ERROR_PATHS", {})
+
+    class APIConnectionError(Exception):
+        pass
+
+    async def handler(op, kwargs):
+        raise APIConnectionError("not a known SDK type")
+
+    openai_client.set_handler(handler)
+    with pytest.raises(APIConnectionError):
+        await adapter.chat("hi")
 
 
 def test_provider_name_property():

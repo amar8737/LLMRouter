@@ -136,6 +136,91 @@ def test_chat_completions_returns_503_when_no_healthy_provider():
     assert response.status_code == 503
 
 
+def test_api_key_auth_blocks_unauthenticated_chat(test_router):
+    app = create_app(router=test_router, api_keys=["sk-test"])
+    with TestClient(app) as test_client:
+        assert (
+            test_client.post(
+                "/v1/chat/completions",
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            ).status_code
+            == 401
+        )
+        assert (
+            test_client.post(
+                "/v1/chat/completions",
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": "Bearer wrong"},
+            ).status_code
+            == 401
+        )
+        assert (
+            test_client.post(
+                "/v1/chat/completions",
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": "Bearer sk-test"},
+            ).status_code
+            == 200
+        )
+
+
+def test_admin_token_protects_dashboard_and_metrics(test_router):
+    app = create_app(router=test_router, admin_token="admin-secret")
+    with TestClient(app) as test_client:
+        assert test_client.get("/metrics").status_code == 401
+        assert test_client.get("/dashboard").status_code == 401
+        assert (
+            test_client.get(
+                "/metrics", headers={"Authorization": "Bearer admin-secret"}
+            ).status_code
+            == 200
+        )
+        assert (
+            test_client.get(
+                "/dashboard", headers={"Authorization": "Bearer admin-secret"}
+            ).status_code
+            == 200
+        )
+
+
+def test_docs_disabled_returns_404(test_router):
+    app = create_app(router=test_router, docs_enabled=False)
+    with TestClient(app) as test_client:
+        assert test_client.get("/docs").status_code == 404
+
+
+def test_streaming_error_emits_503_and_done():
+    class Broken:
+        async def chat(self, prompt, **kwargs):
+            raise HTTPError(503, "down")
+
+        async def embeddings(self, text, **kwargs):
+            raise HTTPError(503, "down")
+
+        async def responses(self, *args, **kwargs):
+            raise HTTPError(503, "down")
+
+        async def stream(self, prompt, **kwargs):
+            raise HTTPError(503, "down")
+            yield  # pragma: no cover
+
+    node = ClientNode("k1", Broken(), failure_threshold=1, cooldown_seconds=60)
+    node.circuit_breaker.record_failure()
+    provider = ProviderRouter("broken_provider", [node])
+    router = LLMRouter(CompositeRouter([provider]))
+
+    app = create_app(router=router)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+        assert response.status_code == 200
+        text = response.text
+        assert "[DONE]" in text
+        assert "data:" in text
+
+
 def test_cli_help(capsys, monkeypatch):
     monkeypatch.setattr("sys.argv", ["llmrouterx", "--help"])
     with pytest.raises(SystemExit):
@@ -152,6 +237,9 @@ def test_cli_serve_has_config_and_workers_flags(capsys, monkeypatch):
     assert "--config" in captured.out
     assert "--workers" in captured.out
     assert "--log-level" in captured.out
+    assert "--admin-token" in captured.out
+    assert "--api-key" in captured.out
+    assert "--no-docs" in captured.out
 
 
 def test_config_roundtrip_from_dict():
@@ -188,6 +276,29 @@ def test_config_from_file_rejects_unknown_keys(tmp_path):
     path.write_text(json.dumps({"bogus_key": 1}))
     with pytest.raises(ValueError, match="Unknown config keys"):
         RouterConfig.from_file(path)
+
+
+def test_config_validate_detects_missing_client_field():
+    cfg = RouterConfig(providers=[{"name": "p", "clients": [{"api_key": "k"}]}])
+    with pytest.raises(ValueError, match="without a 'client' field"):
+        cfg.validate()
+
+
+def test_config_bool_parsing_string_false():
+    cfg = RouterConfig.from_dict(
+        {
+            "providers": [{"name": "p", "clients": [{"client": "x", "api_key": "k"}]}],
+            "enable_circuit_breaker": "false",
+        }
+    )
+    assert cfg.enable_circuit_breaker is False
+    cfg_true = RouterConfig.from_dict(
+        {
+            "providers": [{"name": "p", "clients": [{"client": "x", "api_key": "k"}]}],
+            "enable_circuit_breaker": "true",
+        }
+    )
+    assert cfg_true.enable_circuit_breaker is True
 
 
 def test_resolve_key_prefers_literal():

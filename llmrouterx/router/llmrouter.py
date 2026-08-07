@@ -5,17 +5,20 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config.config import RouterConfig
 from ..context import RequestContext
-from ..exceptions import NoHealthyClientError, StreamError
+from ..exceptions import ConfigurationError, NoHealthyClientError, StreamError
 from ..metrics.metrics import MetricsCollector
 from ..middleware.base import BaseMiddleware, MiddlewareResult
 from ..providers.composite_router import CompositeRouter
 from ..retry.circuit_breaker import CircuitBreaker
 from ..retry.exponential import ExponentialRetry, HTTPError
 from ..utils.cancellation import cancel_tasks_and_wait
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +28,90 @@ RETRYABLE_EXCEPTIONS = (
     HTTPError,
 )
 
+# Process-wide, HTTP/2-enabled keep-alive connection pool shared by every
+# provider SDK client created by :func:`_default_sdk_client`. Reusing one
+# transport pool avoids repeated TCP/TLS handshakes and lets requests to the
+# same host multiplex over a single connection. Created lazily so that
+# importing ``llmrouterx`` does not force a hard dependency on ``httpx``.
+_SHARED_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    """Return the process-wide shared HTTP/2 connection pool."""
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is None:
+        import httpx  # lazily imported: guaranteed present with any SDK/server
+
+        try:
+            client = httpx.AsyncClient(
+                http2=True,  # multiplex many requests over a single connection
+                limits=httpx.Limits(
+                    max_keepalive_connections=1000,
+                    max_connections=2000,
+                ),
+                timeout=httpx.Timeout(60.0, connect=5.0),
+            )
+        except ImportError:  # pragma: no cover - h2 extra not installed
+            # HTTP/2 requires the optional 'h2' package; degrade to HTTP/1.1
+            # keep-alive pooling rather than failing.
+            client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=1000,
+                    max_connections=2000,
+                ),
+                timeout=httpx.Timeout(60.0, connect=5.0),
+            )
+        _SHARED_HTTP_CLIENT = client
+    return _SHARED_HTTP_CLIENT
+
+
+async def shutdown_shared_http_client() -> None:
+    """Close the process-wide shared HTTP client and release its connection pool.
+
+    Safe to call more than once (no-op when already closed). Embedders that use
+    :meth:`LLMRouter.from_cascade` should call this at application shutdown so
+    keep-alive connections are not left open.
+    """
+    global _SHARED_HTTP_CLIENT
+    client = _SHARED_HTTP_CLIENT
+    _SHARED_HTTP_CLIENT = None
+    if client is not None:
+        with suppress(Exception):
+            await client.aclose()
+
 
 class _StreamEnd:
     """Sentinel pushed to a stream queue when the worker finishes."""
+
+
+def _default_sdk_client(provider: str, api_key: str) -> Any:
+    """Build the conventional SDK client for a provider in :meth:`from_cascade`."""
+    provider = (provider or "").strip().lower()
+
+    if provider == "anthropic":
+        try:
+            from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise ConfigurationError(
+                "Provider 'anthropic' requires the 'anthropic' package. "
+                "Install it with: pip install llmrouterx[anthropic]"
+            ) from exc
+        return AsyncAnthropic(
+            api_key=api_key,
+            http_client=_get_shared_http_client(),
+        )
+
+    try:
+        from openai import AsyncOpenAI  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise ConfigurationError(
+            "OpenAI-compatible providers require the 'openai' package. "
+            "Install it with: pip install llmrouterx[openai]"
+        ) from exc
+    return AsyncOpenAI(
+        api_key=api_key,
+        http_client=_get_shared_http_client(),
+    )
 
 
 class LLMRouter:
@@ -216,6 +300,25 @@ class LLMRouter:
         finally:
             self._active_tasks.discard(task)
 
+    def _record_usage_metrics(self, op: str, context: Any) -> None:
+        """Record token usage attached to the request context by adapters.
+
+        Adapters populate ``context``'s ``usage`` metadata (via
+        :class:`RequestContext.set`) when the provider response carries usage.
+        No-op when no usage was reported, so adapters that don't expose it
+        are unaffected.
+        """
+        usage: Any = context.get("usage") if context is not None else None
+        if not usage:
+            return
+
+        provider = context.provider or "unknown"
+        self.metrics.track_tokens(
+            provider=provider,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+        )
+
     # --------------------------------------------------------
     # Core routing
     # --------------------------------------------------------
@@ -237,28 +340,29 @@ class LLMRouter:
 
         if self._request_semaphore:
             await self._request_semaphore.acquire()
-        context = context or RequestContext(
-            operation=op,
-            prompt=payload.get("prompt"),
-            model=payload.get("model"),
-            max_retries=getattr(self.retry, "max_retries", 0),
-        )
-
-        payload, short_circuit = await self._before(op, payload, context)
-
-        if short_circuit is not None:
-            self.metrics.incr(f"middleware.short_circuit.{op}")
-            context.finish()
-            if self._request_semaphore:
-                self._request_semaphore.release()
-            return short_circuit
-
-        started = time.perf_counter()
-        deadline = started + self._total_timeout if self._total_timeout is not None else None
-
-        attempt = 0
 
         try:
+            context = context or RequestContext(
+                operation=op,
+                prompt=payload.get("prompt"),
+                model=payload.get("model"),
+                max_retries=getattr(self.retry, "max_retries", 0),
+            )
+
+            payload, short_circuit = await self._before(op, payload, context)
+
+            if short_circuit is not None:
+                self.metrics.incr(f"middleware.short_circuit.{op}")
+                context.finish()
+                return short_circuit
+
+            started = time.perf_counter()
+            deadline = (
+                started + self._total_timeout if self._total_timeout is not None else None
+            )
+
+            attempt = 0
+
             while True:
                 if deadline is not None and time.perf_counter() >= deadline:
                     self.metrics.incr(f"errors.{op}.total_timeout")
@@ -314,6 +418,8 @@ class LLMRouter:
                     self.metrics.incr(f"requests.{op}", labels=labels)
                     self.metrics.timing(f"latency.{op}", elapsed, labels=labels)
 
+                    self._record_usage_metrics(op, context)
+
                     if self._circuit_breaker:
                         self._circuit_breaker.record_success()
 
@@ -325,18 +431,54 @@ class LLMRouter:
                     self.metrics.incr(f"cancelled.{op}")
                     raise
 
-                except NoHealthyClientError:
-                    self.metrics.incr(f"errors.{op}.no_healthy_clients")
-                    logger.error(
-                        "No healthy clients for '%s' [req_id=%s]",
-                        op,
-                        context.request_id,
-                    )
-                    if self._circuit_breaker:
-                        self._circuit_breaker.record_failure()
-                    raise
+                except Exception as raw_exc:
+                    exc = raw_exc
 
-                except RETRYABLE_EXCEPTIONS as exc:
+                    # CompositeRouter now reports total failure as a single
+                    # NoHealthyClientError carrying every provider error. If any
+                    # of those is transient, unwrap it so the shared retry
+                    # policy can still classify and retry it (e.g. a 429/5xx on
+                    # every provider). Otherwise propagate as a hard failure.
+                    if isinstance(raw_exc, NoHealthyClientError):
+                        self.metrics.incr(f"errors.{op}.no_healthy_clients")
+                        if raw_exc.errors:
+                            # Surface the most relevant underlying error so the
+                            # middleware/retry policy still sees the real cause,
+                            # but keep the full failure sequence attached for
+                            # actionable debugging.
+                            retryable = [
+                                e
+                                for e in raw_exc.errors
+                                if isinstance(e, RETRYABLE_EXCEPTIONS)
+                            ]
+                            exc = retryable[-1] if retryable else raw_exc.errors[-1]
+                            with suppress(AttributeError):
+                                exc.errors = list(raw_exc.errors)  # type: ignore[attr-defined]
+                        else:
+                            logger.error(
+                                "No healthy clients for '%s' [req_id=%s]",
+                                op,
+                                context.request_id,
+                            )
+                            if self._circuit_breaker:
+                                self._circuit_breaker.record_failure()
+                            raise
+
+                    if not isinstance(exc, RETRYABLE_EXCEPTIONS):
+                        self.metrics.incr(f"errors.{op}.non_retryable")
+                        await self._on_exception(op, payload, exc, context)
+                        logger.exception(
+                            "Non-retryable error in '%s' [req_id=%s]: %s",
+                            op,
+                            context.request_id,
+                            exc.__class__.__name__,
+                        )
+                        if self._circuit_breaker:
+                            self._circuit_breaker.record_failure()
+                        if exc is raw_exc:
+                            raise
+                        raise exc from raw_exc
+
                     attempt += 1
                     self.metrics.incr(f"errors.{op}")
 
@@ -363,7 +505,9 @@ class LLMRouter:
                         self.metrics.incr(f"errors.{op}.retries_exhausted")
                         if self._circuit_breaker:
                             self._circuit_breaker.record_failure()
-                        raise
+                        if exc is raw_exc:
+                            raise
+                        raise exc from raw_exc
 
                     delay = self.retry.get_backoff(exc, attempt)
                     context.increment_retry()
@@ -380,19 +524,6 @@ class LLMRouter:
                         self.metrics.timing(f"retry.backoff.{op}", delay)
 
                     await self.retry.wait(exc, attempt)
-
-                except Exception as exc:
-                    self.metrics.incr(f"errors.{op}.non_retryable")
-                    await self._on_exception(op, payload, exc, context)
-                    logger.exception(
-                        "Non-retryable error in '%s' [req_id=%s]: %s",
-                        op,
-                        context.request_id,
-                        exc.__class__.__name__,
-                    )
-                    if self._circuit_breaker:
-                        self._circuit_breaker.record_failure()
-                    raise
 
         finally:
             if self._request_semaphore:
@@ -481,9 +612,6 @@ class LLMRouter:
         if self._closed:
             raise RuntimeError("Router has been shut down.")
 
-        if self._request_semaphore:
-            await self._request_semaphore.acquire()
-
         context = RequestContext(
             operation="stream",
             prompt=prompt,
@@ -495,6 +623,10 @@ class LLMRouter:
         end = _StreamEnd()
 
         async def worker() -> None:
+            # The concurrency slot is held only for the lifetime of the worker,
+            # not for the lifetime of the (possibly never-consumed) generator.
+            if self._request_semaphore:
+                await self._request_semaphore.acquire()
             try:
                 payload, short_circuit = await self._before(
                     "stream",
@@ -545,13 +677,19 @@ class LLMRouter:
             finally:
                 context.finish()
                 await queue.put(end)
+                if self._request_semaphore:
+                    self._request_semaphore.release()
 
-        task = asyncio.create_task(worker())
-        self._track_task(task)
-
+        task: asyncio.Task[Any] | None = None
         closed_early = False
 
         try:
+            # Start the worker lazily on first consumption so that a generator
+            # that is created but never iterated (nor aclose()d) holds neither
+            # a task nor a concurrency slot.
+            task = asyncio.create_task(worker())
+            self._track_task(task)
+
             while True:
                 item = await queue.get()
 
@@ -562,24 +700,22 @@ class LLMRouter:
         except GeneratorExit:
             closed_early = True
         finally:
-            if not task.done():
+            if task is not None and not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
 
-            self._active_tasks.discard(task)
-
-            if self._request_semaphore:
-                self._request_semaphore.release()
+            if task is not None:
+                self._active_tasks.discard(task)
 
         if closed_early:
             # Consumer abandoned the generator (aclose()); end it cleanly.
             return
 
-        if task.cancelled():
+        if task is not None and task.cancelled():
             raise asyncio.CancelledError
 
-        exc = task.exception()
+        exc = task.exception() if task is not None else None
         if exc is not None:
             raise exc
 
@@ -638,6 +774,64 @@ class LLMRouter:
         from .factory import RouterFactory
 
         return RouterFactory.build(config)
+
+    @classmethod
+    def from_cascade(
+        cls,
+        cascade: list[str],
+        *,
+        client_factory: Any | None = None,
+    ) -> LLMRouter:
+        """
+        Quick-start factory for a simple fallback chain.
+
+        Each item is formatted ``"provider:api_key"`` and becomes a single
+        provider in the order given; the first that can serve a request wins.
+        A provider SDK client is constructed automatically for you.
+
+        Example::
+
+            router = LLMRouter.from_cascade(
+                ["openai:sk-...", "anthropic:sk-ant-...", "groq:gsk-..."]
+            )
+
+        The default clients are ``AsyncOpenAI`` (for OpenAI-compatible
+        providers such as ``openai``, ``groq``, ``together``, ``mistral``,
+        ``gemini``, ``nim``) and ``AsyncAnthropic`` (for ``anthropic``).
+        Providers that need a custom base URL/endpoint, or hand-built SDK
+        clients, should pass ``client_factory(provider, api_key)`` or build the
+        router with :meth:`from_config`.
+        """
+        from ..adapters.factory import AdapterFactory
+        from ..client.client_node import ClientNode
+        from ..providers.composite_router import CompositeRouter
+        from ..providers.provider_router import ProviderRouter
+
+        providers = []
+        for item in cascade:
+            if ":" not in item:
+                raise ValueError(
+                    f"Cascade item {item!r} must be formatted as 'provider:api_key'."
+                )
+
+            provider_name, api_key = item.split(":", 1)
+            client = (
+                client_factory(provider_name, api_key)
+                if client_factory is not None
+                else _default_sdk_client(provider_name, api_key)
+            )
+
+            adapter = AdapterFactory.create(
+                provider=provider_name,
+                client=client,
+            )
+            node = ClientNode(api_key=api_key, client=adapter)
+            providers.append(
+                ProviderRouter(name=provider_name, clients=[node])
+            )
+
+        composite = CompositeRouter(providers)
+        return cls(composite_router=composite)
 
     # --------------------------------------------------------
     # Lifecycle

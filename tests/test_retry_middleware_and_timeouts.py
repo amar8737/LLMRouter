@@ -80,8 +80,8 @@ def test_on_retry_observer_preserves_retries():
     with pytest.raises(HTTPError):
         asyncio.run(router.chat("hi"))
 
-    # max_retries=3 allows 2 retries after the initial failure.
-    assert len(mw.calls) == 2
+    # max_retries=3 allows 3 retries after the initial failure.
+    assert len(mw.calls) == 3
 
 
 def test_on_retry_hook_error_does_not_break_retries():

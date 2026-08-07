@@ -5,15 +5,15 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 try:
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import Depends, FastAPI, HTTPException, Request
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
     from pydantic import BaseModel, Field
     from starlette.middleware.base import BaseHTTPMiddleware
 except ImportError as exc:  # pragma: no cover
@@ -22,7 +22,7 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from llmrouterx.config.config import RouterConfig
-from llmrouterx.exceptions import NoHealthyClientError
+from llmrouterx.exceptions import NoHealthyClientError, StreamError
 from llmrouterx.router.factory import RouterFactory
 from llmrouterx.router.llmrouter import LLMRouter
 
@@ -130,6 +130,36 @@ def _error_payload(
     )
 
 
+def _make_bearer_guard(token: str | Sequence[str] | None) -> Any:
+    """Build a FastAPI dependency that requires ``Bearer <token>``.
+
+    ``token`` may be a single string or a collection of accepted values.
+    When it is None the guard is a no-op (auth disabled), so the gateway
+    remains usable out of the box and is only locked down when an admin/API
+    token is configured.
+    """
+    if token is None:
+        accepted: set[str] | None = None
+    elif isinstance(token, str):
+        accepted = {token}
+    else:
+        accepted = set(token)
+
+    async def _guard(request: Request) -> None:
+        if accepted is None:
+            return
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and auth[len("Bearer "):] in accepted:
+            return
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return _guard
+
+
 def _sse_chunk(text: str, request_id: str, created: int) -> str:
     data = {
         "id": request_id,
@@ -152,7 +182,6 @@ def _sse_done(request_id: str, created: int) -> str:
 
 class _AccessLogMiddleware(BaseHTTPMiddleware):
     """Inject a request ID and emit a per-request access log line."""
-
     def __init__(self, app, enabled: bool = True) -> None:
         super().__init__(app)
         self.enabled = enabled
@@ -192,6 +221,9 @@ def create_app(
     config_path: str | os.PathLike[str] | None = None,
     cors_origins: list[str] | None = None,
     enable_access_log: bool = True,
+    admin_token: str | None = None,
+    api_keys: Sequence[str] | None = None,
+    docs_enabled: bool = True,
 ) -> FastAPI:
     """Application factory for the standalone HTTP Gateway.
 
@@ -205,8 +237,24 @@ def create_app(
         config_path: Path to a JSON config file (see ``RouterConfig.from_file``).
         cors_origins: If provided, enable CORS for these origins.
         enable_access_log: Whether to emit per-request access log lines.
+        admin_token: If set, require ``Authorization: Bearer <token>`` on the
+            admin endpoints (``/dashboard``, ``/metrics``). None disables auth.
+        api_keys: If set, require ``Authorization: Bearer <key>`` on the LLM
+            endpoints (``/v1/*``) using one of these keys. None disables auth.
+        docs_enabled: Whether to expose the interactive OpenAPI docs.
     """
     start_time = time.monotonic()
+
+    # Fall back to environment configuration so both inline-config and
+    # multi-worker (factory) modes pick up auth/docs settings consistently.
+    if admin_token is None:
+        admin_token = os.getenv("LLMROUTER_ADMIN_TOKEN") or None
+    if api_keys is None:
+        raw_keys = os.getenv("LLMROUTER_API_KEYS")
+        api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()] if raw_keys else None
+    docs_env = os.getenv("LLMROUTER_DOCS")
+    if docs_env is not None:
+        docs_enabled = docs_env.strip().lower() not in {"0", "false", "no"}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -227,9 +275,21 @@ def create_app(
         if app.state.owns_router and app.state.llm_router is not None:
             await app.state.llm_router.close()
             _flush_observability(app.state.llm_router)
+            from llmrouterx.router.llmrouter import shutdown_shared_http_client
+
+            await shutdown_shared_http_client()
             logger.info("LLMRouter Gateway API shut down cleanly.")
 
-    app = FastAPI(title="LLMRouter Gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="LLMRouter Gateway",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+    )
+
+    admin_guard = _make_bearer_guard(admin_token)
+    api_key_guard = _make_bearer_guard(list(api_keys) if api_keys else None)
 
     app.add_middleware(_AccessLogMiddleware, enabled=enable_access_log)
 
@@ -290,7 +350,7 @@ def create_app(
             uptime_seconds=time.monotonic() - start_time,
         )
 
-    @app.get("/v1/models", response_model=ModelListResponse)
+    @app.get("/v1/models", response_model=ModelListResponse, dependencies=[Depends(api_key_guard)])
     async def list_models(request: Request) -> ModelListResponse:
         rt: LLMRouter = request.app.state.llm_router
         models: list[ModelEntry] = []
@@ -300,19 +360,34 @@ def create_app(
                 models.append(ModelEntry(id=name, owned_by=name))
         return ModelListResponse(data=models)
 
-    @app.get("/metrics")
+    @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(admin_guard)])
+    async def dashboard(request: Request) -> HTMLResponse:
+        """Zero-config observability dashboard (auto-refreshing)."""
+        html_content = _DASHBOARD_HTML
+        return HTMLResponse(content=html_content)
+
+    @app.get("/metrics", dependencies=[Depends(admin_guard)])
     async def metrics(request: Request) -> dict[str, Any]:
         rt: LLMRouter = request.app.state.llm_router
         snapshot = rt.get_metrics()
         snapshot["started_at"] = start_time
         return snapshot
 
-    @app.post("/v1/chat/completions")
+    @app.post(
+        "/v1/chat/completions",
+        dependencies=[Depends(api_key_guard)],
+    )
     async def chat_completions(
         req: ChatCompletionRequest, request: Request
     ) -> Any:
         rt: LLMRouter = request.app.state.llm_router
         prompt = _extract_prompt(req.messages)
+
+        kwargs: dict[str, Any] = {}
+        if req.temperature is not None:
+            kwargs["temperature"] = req.temperature
+        if req.max_tokens is not None:
+            kwargs["max_tokens"] = req.max_tokens
 
         if req.stream:
             request_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -320,22 +395,33 @@ def create_app(
 
             async def sse_generator() -> AsyncGenerator[str, None]:
                 try:
-                    async for chunk in rt.stream(prompt=prompt, model=req.model):
+                    async for chunk in rt.stream(
+                        prompt=prompt, model=req.model, **kwargs
+                    ):
                         yield _sse_chunk(_coerce_text(chunk), request_id, created)
                 except NoHealthyClientError as exc:
                     yield _sse_error(str(exc), error_type="server_error", code="503")
-                    return
+                except StreamError:
+                    # A provider died mid-stream; the underlying cause is
+                    # re-raised by the router as a 503-family error.
+                    yield _sse_error(
+                        "Provider stream interrupted",
+                        error_type="server_error",
+                        code="503",
+                    )
                 except Exception as exc:
                     logger.exception("Error streaming chat completion")
                     yield _sse_error(str(exc), error_type="server_error", code="500")
-                    return
-                yield _sse_done(request_id, created)
-                yield "data: [DONE]\n\n"
+                finally:
+                    # Signal end-of-stream (with or without an error) so
+                    # OpenAI-compatible clients finalize cleanly.
+                    yield _sse_done(request_id, created)
+                    yield "data: [DONE]\n\n"
 
             return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
         try:
-            text = _coerce_text(await rt.chat(prompt=prompt, model=req.model))
+            text = _coerce_text(await rt.chat(prompt=prompt, model=req.model, **kwargs))
         except NoHealthyClientError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
@@ -355,6 +441,65 @@ def create_app(
 def _sse_error(message: str, *, error_type: str, code: str) -> str:
     data = _error_payload(message, error_type, code=code).model_dump()
     return f"data: {json.dumps(data)}\n\n"
+
+
+_DASHBOARD_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLMRouter Operations</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            background: #121212; color: #e0e0e0; padding: 2rem;
+        }
+        h1 { margin-top: 0; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .card {
+            background: #1e1e1e; padding: 1.5rem; border-radius: 8px;
+            margin-bottom: 1rem; border: 1px solid #333;
+        }
+        pre {
+            background: #000; padding: 1rem; overflow-x: auto;
+            border-radius: 4px; color: #4af626;
+        }
+        h2 { margin-top: 0; }
+        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>LLMRouter Gateway</h1>
+    <div class="grid">
+        <div class="card">
+            <h2>Live Health</h2>
+            <pre id="health-data">Loading...</pre>
+        </div>
+        <div class="card">
+            <h2>Live Metrics</h2>
+            <pre id="metrics-data">Loading...</pre>
+        </div>
+    </div>
+    <script>
+        async function poll() {
+            try {
+                const [healthRes, metricsRes] =
+                    await Promise.all([fetch('/health'), fetch('/metrics')]);
+                const health = JSON.stringify(await healthRes.json(), null, 2);
+                const metrics = JSON.stringify(await metricsRes.json(), null, 2);
+                document.getElementById('health-data').textContent = health;
+                document.getElementById('metrics-data').textContent = metrics;
+            } catch (e) {
+                console.error("Polling failed", e);
+            }
+        }
+        poll();
+        setInterval(poll, 2000);
+    </script>
+</body>
+</html>
+"""
 
 
 def _flush_observability(router: LLMRouter) -> None:

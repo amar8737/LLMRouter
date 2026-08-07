@@ -66,7 +66,10 @@ class ExponentialRetry:
         exc: Exception,
         attempt: int,
     ) -> bool:
-        if attempt >= self.max_retries:
+        # ``attempt`` is 1-based: it is 1 immediately after the first failure.
+        # ``max_retries`` is the *number of retries* allowed after the initial
+        # call, so we retry for attempts 1..max_retries and stop from then on.
+        if attempt > self.max_retries:
             return False
 
         if isinstance(exc, HTTPError):
