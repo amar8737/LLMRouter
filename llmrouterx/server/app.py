@@ -12,7 +12,7 @@ from statistics import mean
 from typing import Any, Literal
 
 try:
-    from fastapi import Depends, FastAPI, HTTPException, Request
+    from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -23,6 +23,15 @@ except ImportError as exc:  # pragma: no cover
         "Server dependencies missing. Install them with: pip install llmrouterx[server]"
     ) from exc
 
+from llmrouterx.config.api_keys import (
+    APIKey,
+    get_api_key_db,
+    create_api_key,
+    validate_api_key,
+    KEY_PREFIX,
+    VALID_SCOPES,
+    APIKeyDatabase,
+)
 from llmrouterx.config.config import RouterConfig
 from llmrouterx.exceptions import NoHealthyClientError, StreamError
 from llmrouterx.router.factory import RouterFactory
@@ -94,6 +103,38 @@ class ErrorResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# API Key Management Models
+# ---------------------------------------------------------------------------
+
+
+class APIKeyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    scopes: list[str] = Field(default_factory=lambda: ["chat", "embeddings"])
+    expires_in: str | None = Field(
+        default=None,
+        pattern=r"^\d+[hdm]$",  # e.g., "24h", "7d", "30m"
+    )
+
+
+class APIKeyCreateResponse(BaseModel):
+    key: str  # Full key (only returned once)
+    prefix: str
+    name: str
+    scopes: list[str]
+    created_at: str
+    expires_at: str | None
+
+
+class APIKeyListResponse(BaseModel):
+    keys: list[dict[str, Any]]
+
+
+class APIKeyRevokeResponse(BaseModel):
+    revoked: bool
+    prefix: str
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -132,13 +173,21 @@ def _error_payload(
     )
 
 
-def _make_bearer_guard(token: str | Sequence[str] | None) -> Any:
+def _make_bearer_guard(
+    token: str | Sequence[str] | None,
+    *,
+    check_db: bool = False,
+    db_path: str | None = None,
+) -> Any:
     """Build a FastAPI dependency that requires ``Bearer <token>``.
 
     ``token`` may be a single string or a collection of accepted values.
     When it is None the guard is a no-op (auth disabled), so the gateway
     remains usable out of the box and is only locked down when an admin/API
     token is configured.
+
+    If ``check_db`` is True, also validate against the API key database
+    (for /v1/* endpoints).
     """
     if token is None:
         accepted: set[str] | None = None
@@ -148,11 +197,33 @@ def _make_bearer_guard(token: str | Sequence[str] | None) -> Any:
         accepted = set(token)
 
     async def _guard(request: Request) -> None:
-        if accepted is None:
+        if accepted is None and not check_db:
             return
+
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[len("Bearer ") :] in accepted:
-            return
+        if auth.startswith("Bearer "):
+            bearer_token = auth[len("Bearer ") :]
+            if accepted is not None and bearer_token in accepted:
+                return
+            if check_db:
+                # Check API key database
+                record = validate_api_key(bearer_token, db_path)
+                if record and record.is_valid:
+                    # Check scopes for /v1/* endpoints
+                    if "chat" in record.scopes or "embeddings" in record.scopes:
+                        return
+
+        # Also check query param for token
+        query_token = request.query_params.get("token")
+        if query_token:
+            if accepted is not None and query_token in accepted:
+                return
+            if check_db:
+                record = validate_api_key(query_token, db_path)
+                if record and record.is_valid:
+                    if "chat" in record.scopes or "embeddings" in record.scopes:
+                        return
+
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing bearer token",
@@ -226,6 +297,7 @@ def create_app(
     enable_access_log: bool = True,
     admin_token: str | None = None,
     api_keys: Sequence[str] | None = None,
+    api_keys_db_path: str | None = None,
     docs_enabled: bool = True,
     health_timeout: float | None = None,
 ) -> FastAPI:
@@ -242,9 +314,10 @@ def create_app(
         cors_origins: If provided, enable CORS for these origins.
         enable_access_log: Whether to emit per-request access log lines.
         admin_token: If set, require ``Authorization: Bearer <token>`` on the
-            admin endpoints (``/dashboard``, ``/metrics``). None disables auth.
+            admin endpoints (``/dashboard``, ``/metrics``, ``/admin/*``). None disables auth.
         api_keys: If set, require ``Authorization: Bearer <key>`` on the LLM
             endpoints (``/v1/*``) using one of these keys. None disables auth.
+        api_keys_db_path: Path to the API key database file. If None, uses default location.
         docs_enabled: Whether to expose the interactive OpenAPI docs.
     """
     start_time = time.monotonic()
@@ -256,6 +329,8 @@ def create_app(
     if api_keys is None:
         raw_keys = os.getenv("LLMROUTER_API_KEYS")
         api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()] if raw_keys else None
+    if api_keys_db_path is None:
+        api_keys_db_path = os.getenv("LLMROUTER_API_KEYS_DB")
     docs_env = os.getenv("LLMROUTER_DOCS")
     if docs_env is not None:
         docs_enabled = docs_env.strip().lower() not in {"0", "false", "no"}
@@ -294,7 +369,12 @@ def create_app(
     )
 
     admin_guard = _make_bearer_guard(admin_token)
-    api_key_guard = _make_bearer_guard(list(api_keys) if api_keys else None)
+    # api_key_guard checks both env var keys and database keys
+    api_key_guard = _make_bearer_guard(
+        list(api_keys) if api_keys else None,
+        check_db=True,
+        db_path=api_keys_db_path,
+    )
 
     app.add_middleware(_AccessLogMiddleware, enabled=enable_access_log)
 
@@ -377,7 +457,7 @@ def create_app(
     @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(admin_guard)])
     async def dashboard(request: Request) -> HTMLResponse:
         """Zero-config observability dashboard (auto-refreshing)."""
-        html_content = _DASHBOARD_HTML
+        html_content = _DASHBOARD_HTML.replace("__ADMIN_TOKEN__", admin_token or "")
         return HTMLResponse(content=html_content)
 
     @app.get("/metrics", dependencies=[Depends(admin_guard)])
@@ -399,6 +479,80 @@ def create_app(
             "uptime_seconds": time.monotonic() - start_time,
             "timestamp": time.time(),
         }
+
+    # ------------------------------------------------------------------
+    # API Key Management (Admin only)
+    # ------------------------------------------------------------------
+
+    @app.get("/admin/api-keys", response_model=APIKeyListResponse, dependencies=[Depends(admin_guard)])
+    async def list_api_keys(request: Request) -> APIKeyListResponse:
+        """List all API keys (admin only)."""
+        db = get_api_key_db()
+        keys = db.list_keys(include_revoked=True)
+        return APIKeyListResponse(
+            keys=[
+                {
+                    "id": k.id,
+                    "prefix": k.prefix,
+                    "name": k.name,
+                    "scopes": list(k.scopes),
+                    "created_at": k.created_at.isoformat(),
+                    "expires_at": k.expires_at.isoformat() if k.expires_at else None,
+                    "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+                    "revoked": k.revoked,
+                    "is_valid": k.is_valid,
+                }
+                for k in keys
+            ]
+        )
+
+    @app.post("/admin/api-keys", response_model=APIKeyCreateResponse, dependencies=[Depends(admin_guard)])
+    async def create_api_key_endpoint(
+        request: Request,
+        body: APIKeyCreateRequest = Body(...),
+    ) -> APIKeyCreateResponse:
+        """Create a new API key (admin only)."""
+        # Validate scopes
+        for scope in body.scopes:
+            if scope not in VALID_SCOPES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid scope: {scope}. Valid scopes: {VALID_SCOPES}",
+                )
+
+        full_key, record = create_api_key(
+            name=body.name,
+            scopes=tuple(body.scopes),
+            expires_in=body.expires_in,
+        )
+
+        return APIKeyCreateResponse(
+            key=full_key,
+            prefix=record.prefix,
+            name=record.name,
+            scopes=list(record.scopes),
+            created_at=record.created_at.isoformat(),
+            expires_at=record.expires_at.isoformat() if record.expires_at else None,
+        )
+
+    @app.delete("/admin/api-keys/{prefix}", response_model=APIKeyRevokeResponse, dependencies=[Depends(admin_guard)])
+    async def revoke_api_key(prefix: str) -> APIKeyRevokeResponse:
+        """Revoke an API key by prefix (admin only)."""
+        db = get_api_key_db()
+        if not prefix.startswith(KEY_PREFIX):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid key prefix. Must start with {KEY_PREFIX}",
+            )
+
+        revoked = db.revoke_key(prefix)
+        if not revoked:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"API key with prefix {prefix} not found",
+            )
+
+        return APIKeyRevokeResponse(revoked=True, prefix=prefix)
 
     @app.post(
         "/v1/chat/completions",
@@ -611,28 +765,113 @@ _DASHBOARD_HTML = """\
             color: #666;
         }
 
-        /* Sparkline styles */
-        .sparkline-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 1rem;
+        /* API Key panel styles */
+        .api-key-table {
+            width: 100%;
+            font-size: 13px;
+            border-collapse: collapse;
             margin-top: 1rem;
         }
-        .sparkline-card {
-            background: white;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 1rem;
+        .api-key-table th, .api-key-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
         }
-        .sparkline-header {
+        .api-key-table th {
+            font-weight: 500;
+            color: #666;
+        }
+        .api-key-table tr:hover {
+            background: #f5f5f5;
+        }
+        .scope-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 500;
+            margin-right: 4px;
+        }
+        .scope-chat { background: #e3f2fd; color: #1565c0; }
+        .scope-embeddings { background: #f3e5f5; color: #7b1fa2; }
+        .scope-admin { background: #fff3e0; color: #e65100; }
+        .status-badge {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .status-valid { background: #e8f5e9; color: #2e7d32; }
+        .status-revoked { background: #fdeaea; color: #c62828; }
+        .status-expired { background: #fff3e0; color: #e65100; }
+        .btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn-primary { background: #1976d2; color: white; }
+        .btn-primary:hover { background: #1565c0; }
+        .btn-danger { background: #d32f2f; color: white; }
+        .btn-danger:hover { background: #b71c1c; }
+        .btn-secondary { background: #757575; color: white; }
+        .btn-secondary:hover { background: #616161; }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.show { display: flex; }
+        .modal-content {
+            background: white;
+            border-radius: 8px;
+            padding: 1.5rem;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 0.5rem;
+            margin-bottom: 1rem;
         }
-        .sparkline-title { font-size: 13px; font-weight: 500; color: #333; }
-        .sparkline-value { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
-        .sparkline-canvas { height: 80px; }
+        .modal-title { font-size: 16px; font-weight: 500; }
+        .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #999; }
+        .form-group { margin-bottom: 1rem; }
+        .form-label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 4px; }
+        .form-input { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+        .form-input:focus { outline: none; border-color: #1976d2; }
+        .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; }
+        .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+        .key-display {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 1rem;
+            margin: 1rem 0;
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .copy-btn { margin-left: 8px; }
+        .api-key-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; }
+        .api-key-info { flex: 1; }
+        .api-key-name { font-weight: 500; }
+        .api-key-meta { font-size: 12px; color: #999; margin-top: 4px; }
+        .api-key-actions { display: flex; gap: 8px; }
+        .empty-state { text-align: center; padding: 3rem; color: #999; }
     </style>
 </head>
 <body>
@@ -740,6 +979,15 @@ _DASHBOARD_HTML = """\
             <div id="circuit-breaker-panel" class="loading">Loading...</div>
         </div>
         
+        <!-- API Keys Panel -->
+        <div class="card" style="margin-top: 1rem;">
+            <div class="modal-header">
+                <h2>API Keys</h2>
+                <button class="btn btn-primary" onclick="ApiKeys.openCreateModal()">Create Key</button>
+            </div>
+            <div id="api-keys-panel" class="loading">Loading...</div>
+        </div>
+
     </div>
     
     <script>
@@ -1169,8 +1417,239 @@ _DASHBOARD_HTML = """\
             }
         };
         
+        // API Keys management
+        const ApiKeys = {
+            state: {
+                keys: [],
+                selectedPrefix: null,
+            },
+            
+            async fetch() {
+                try {
+                    const res = await fetch('/admin/api-keys', {
+                        headers: {
+                            'Authorization': `Bearer ${window.__ADMIN_TOKEN__ || ''}`
+                        }
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+                    this.state.keys = data.keys || [];
+                    this.render();
+                } catch (err) {
+                    console.error('Failed to load API keys:', err);
+                    document.getElementById('api-keys-panel').innerHTML = 
+                        '<span class="error">Failed to load API keys</span>';
+                }
+            },
+            
+            render() {
+                const keys = this.state.keys;
+                if (!keys.length) {
+                    document.getElementById('api-keys-panel').innerHTML = 
+                        '<div class="empty-state">No API keys. Click "Create Key" to get started.</div>';
+                    return;
+                }
+                
+                let html = '<table class="api-key-table"><thead><tr>';
+                html += '<th>Name</th><th>Prefix</th><th>Scopes</th><th>Created</th><th>Last Used</th><th>Status</th><th>Actions</th>';
+                html += '</tr></thead><tbody>';
+                
+                for (const key of keys) {
+                    const isExpired = key.expires_at && new Date(key.expires_at) < new Date();
+                    const isValid = key.is_valid && !isExpired;
+                    const statusClass = key.revoked ? 'status-revoked' : (isExpired ? 'status-expired' : 'status-valid');
+                    const statusText = key.revoked ? 'Revoked' : (isExpired ? 'Expired' : 'Valid');
+                    
+                    const scopesHtml = (key.scopes || []).map(s => 
+                        `<span class="scope-badge scope-${s}">${s}</span>`
+                    ).join('');
+                    
+                    const created = new Date(key.created_at).toLocaleString();
+                    const lastUsed = key.last_used_at ? new Date(key.last_used_at).toLocaleString() : 'Never';
+                    
+                    html += `
+                        <tr>
+                            <td>${this.escapeHtml(key.name)}</td>
+                            <td><code>${this.escapeHtml(key.prefix)}</code></td>
+                            <td>${scopesHtml}</td>
+                            <td>${created}</td>
+                            <td>${lastUsed}</td>
+                            <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                            <td>
+                                <div class="api-key-actions">
+                                    ${!key.revoked ? `<button class="btn btn-danger" onclick="ApiKeys.confirmRevoke('${key.prefix}')">Revoke</button>` : ''}
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                }
+                
+                html += '</tbody></table>';
+                document.getElementById('api-keys-panel').innerHTML = html;
+            },
+            
+            openCreateModal() {
+                const modalHtml = `
+                    <div class="modal show" id="create-key-modal" onclick="ApiKeys.closeModal(event)">
+                        <div class="modal-content" onclick="event.stopPropagation()">
+                            <div class="modal-header">
+                                <span class="modal-title">Create API Key</span>
+                                <button class="modal-close" onclick="ApiKeys.closeModal()">&times;</button>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Name</label>
+                                <input type="text" class="form-input" id="key-name" placeholder="e.g., Production API" required maxlength="100">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Scopes</label>
+                                <div class="checkbox-group">
+                                    <label class="checkbox-label"><input type="checkbox" value="chat" checked> Chat</label>
+                                    <label class="checkbox-label"><input type="checkbox" value="embeddings" checked> Embeddings</label>
+                                    <label class="checkbox-label"><input type="checkbox" value="admin"> Admin</label>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Expires In (optional)</label>
+                                <input type="text" class="form-input" id="key-expires" placeholder="e.g., 24h, 7d, 30d (leave empty for no expiry)">
+                                <small style="color: #999;">Format: number + h/d/m (hours/days/minutes)</small>
+                            </div>
+                            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                                <button class="btn btn-secondary" onclick="ApiKeys.closeModal()">Cancel</button>
+                                <button class="btn btn-primary" onclick="ApiKeys.createKey()">Create Key</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.insertAdjacentHTML('beforeend', modalHtml);
+            },
+            
+            closeModal(event) {
+                if (event && event.target !== event.currentTarget) return;
+                const modal = document.getElementById('create-key-modal');
+                if (modal) modal.remove();
+                
+                const keyModal = document.getElementById('show-key-modal');
+                if (keyModal) keyModal.remove();
+            },
+            
+            async createKey() {
+                const name = document.getElementById('key-name').value.trim();
+                if (!name) {
+                    alert('Please enter a name');
+                    return;
+                }
+                
+                const scopes = Array.from(document.querySelectorAll('#create-key-modal input[type="checkbox"]:checked'))
+                    .map(cb => cb.value);
+                
+                const expiresIn = document.getElementById('key-expires').value.trim() || null;
+                
+                try {
+                    const res = await fetch('/admin/api-keys', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${window.__ADMIN_TOKEN__ || ''}`
+                        },
+                        body: JSON.stringify({ name, scopes, expires_in: expiresIn })
+                    });
+                    
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || `HTTP ${res.status}`);
+                    }
+                    
+                    const data = await res.json();
+                    this.closeModal();
+                    this.showKeyModal(data);
+                    await this.fetch();
+                } catch (err) {
+                    console.error('Failed to create API key:', err);
+                    alert('Failed to create key: ' + err.message);
+                }
+            },
+            
+            showKeyModal(data) {
+                const modalHtml = `
+                    <div class="modal show" id="show-key-modal" onclick="ApiKeys.closeModal(event)">
+                        <div class="modal-content" onclick="event.stopPropagation()">
+                            <div class="modal-header">
+                                <span class="modal-title">API Key Created</span>
+                                <button class="modal-close" onclick="ApiKeys.closeModal()">&times;</button>
+                            </div>
+                            <p style="color: #d32f2f; font-weight: 500;">This is the only time the full key will be shown. Copy it now!</p>
+                            <div class="key-display">
+                                ${data.key}
+                                <button class="btn btn-secondary copy-btn" onclick="ApiKeys.copyKey('${data.key}')">Copy</button>
+                            </div>
+                            <p><strong>Prefix:</strong> <code>${data.prefix}</code></p>
+                            <p><strong>Name:</strong> ${this.escapeHtml(data.name)}</p>
+                            <p><strong>Scopes:</strong> ${data.scopes.join(', ')}</p>
+                            <p><strong>Created:</strong> ${data.created_at}</p>
+                            ${data.expires_at ? `<p><strong>Expires:</strong> ${data.expires_at}</p>` : ''}
+                            <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 1rem;">
+                                <button class="btn btn-primary" onclick="ApiKeys.closeModal()">Done</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.insertAdjacentHTML('beforeend', modalHtml);
+            },
+            
+            copyKey(key) {
+                navigator.clipboard.writeText(key).then(() => {
+                    const btn = document.querySelector('.copy-btn');
+                    const original = btn.textContent;
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = original, 2000);
+                });
+            },
+            
+            confirmRevoke(prefix) {
+                if (!confirm(`Revoke API key ${prefix}? This action cannot be undone.`)) return;
+                this.revokeKey(prefix);
+            },
+            
+            async revokeKey(prefix) {
+                try {
+                    const res = await fetch(`/admin/api-keys/${encodeURIComponent(prefix)}`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Bearer ${window.__ADMIN_TOKEN__ || ''}`
+                        }
+                    });
+                    
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || `HTTP ${res.status}`);
+                    }
+                    
+                    await this.fetch();
+                } catch (err) {
+                    console.error('Failed to revoke API key:', err);
+                    alert('Failed to revoke key: ' + err.message);
+                }
+            },
+            
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            },
+            
+            start() {
+                this.fetch();
+            }
+        };
+        
+        // Expose admin token to JavaScript
+        window.__ADMIN_TOKEN__ = "__ADMIN_TOKEN__";
+        
         // Start polling on page load
-        document.addEventListener('DOMContentLoaded', () => Dashboard.start());
+        document.addEventListener('DOMContentLoaded', () => {
+            Dashboard.start();
+            ApiKeys.start();
+        });
     </script>
 </body>
 </html>

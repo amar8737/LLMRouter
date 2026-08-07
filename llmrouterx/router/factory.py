@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..adapters import AdapterFactory
 from ..client.client_node import ClientNode
 from ..config.config import RouterConfig
-from ..config.secrets import resolve_key
+from ..config.api_keys import resolve_api_key
 from ..metrics.metrics import MetricsCollector
 from ..providers.composite_router import CompositeRouter
 from ..providers.provider_router import ProviderRouter
@@ -57,7 +57,7 @@ class RouterFactory:
                 )
 
                 node = ClientNode(
-                    api_key=resolve_key(client_cfg),
+                    api_key=resolve_api_key(client_cfg),
                     client=adapter,
                     streaming=stream_manager,
                     timeout=config.timeout,
