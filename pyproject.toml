@@ -73,6 +73,25 @@ no_implicit_optional = true
 show_error_codes = true
 check_untyped_defs = false
 
+# Optional runtime extras (httpx, langfuse, fastapi, pydantic, starlette,
+# uvicorn) are not installed in minimal/typecheck-only environments, so mypy
+# must not treat their absence as an error. When an extra *is* installed mypy
+# still uses its real types. Provider SDKs are imported lazily / guarded with
+# inline ``# type: ignore[import-not-found]`` and are not listed here.
+[[tool.mypy.overrides]]
+module = [
+    "httpx",
+    "langfuse",
+    "fastapi",
+    "fastapi.*",
+    "pydantic",
+    "pydantic.*",
+    "starlette",
+    "starlette.*",
+    "uvicorn",
+]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
