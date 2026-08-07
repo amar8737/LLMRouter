@@ -7,8 +7,34 @@ from llmrouterx.metrics.metrics import MetricsCollector
 from llmrouterx.providers.composite_router import CompositeRouter
 from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.providers.stub_provider import StubClient
-from llmrouterx.retry.exponential import ExponentialRetry, HTTPError
+from llmrouterx.retry import ExponentialRetry, HTTPError
 from llmrouterx.router.llmrouter import LLMRouter
+
+
+class SlowClient:
+    def __init__(self, delay=1.0):
+        self.delay = delay
+
+    async def request(self, op, payload, api_key=None, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": "done"}
+
+    async def chat(self, prompt, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": f"Chat response: {prompt}"}
+
+    async def embeddings(self, text, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": f"Embeddings: {text}"}
+
+    async def responses(self, *args, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": "Responses OK"}
+
+    async def stream(self, prompt, **kwargs):
+        await asyncio.sleep(self.delay)
+        for part in prompt.split():
+            yield {"response": part}
 
 
 @pytest.mark.asyncio
@@ -130,14 +156,14 @@ class RetryAfterClient:
 
 @pytest.mark.asyncio
 async def test_retry_honors_retry_after_and_succeeds():
+    """Retry-After header is respected when a client returns HTTP 429."""
     metrics = MetricsCollector()
     client = RetryAfterClient(fail_times=2)
     node = ClientNode("r1", client)
     provider = ProviderRouter("rprov", [node])
     composite = CompositeRouter([provider], metrics=metrics)
 
-    # allow up to 3 retries so client can succeed on 3rd call
-    retry = ExponentialRetry(max_retries=4, base=0.01)
+    retry = ExponentialRetry(max_retries=4, base=0.01, rate_limit_min_backoff=0.01)
     router = LLMRouter(composite, metrics=metrics, retry=retry)
 
     start = time.monotonic()
@@ -145,5 +171,6 @@ async def test_retry_honors_retry_after_and_succeeds():
     elapsed = time.monotonic() - start
     assert resp["provider"] == "retry"
 
-    # Because Retry-After was 0.05 and called twice, elapsed should be >= 0.1
-    assert elapsed >= 0.09
+    # Verify Retry-After was respected (should have waited between retries)
+    # With Retry-After: 0.05 and 2 failures, total wait should be >= 0.1s
+    assert elapsed >= 0.09, f"Expected elapsed >= 0.09, got {elapsed}"

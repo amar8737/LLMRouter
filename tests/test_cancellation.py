@@ -15,6 +15,23 @@ class SlowClient:
         await asyncio.sleep(self.delay)
         return {"response": "done"}
 
+    async def chat(self, prompt, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": f"Chat response: {prompt}"}
+
+    async def embeddings(self, text, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": f"Embeddings: {text}"}
+
+    async def responses(self, *args, **kwargs):
+        await asyncio.sleep(self.delay)
+        return {"response": "Responses OK"}
+
+    async def stream(self, prompt, **kwargs):
+        await asyncio.sleep(self.delay)
+        for part in prompt.split():
+            yield {"response": part}
+
 
 def test_cancellation_propagates_to_client():
     client = SlowClient(delay=2.0)
