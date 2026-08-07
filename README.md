@@ -89,16 +89,19 @@ pip install llmrouterx
 import asyncio
 from openai import AsyncOpenAI
 from llmrouterx import LLMRouter
+from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
-
 async def main():
-    # Create an OpenAI client
-    client = AsyncOpenAI(api_key="sk-your-key-here")
+    # Create an OpenAI client and wrap it in the OpenAI adapter
+    sdk_client = AsyncOpenAI(api_key="sk-your-key-here")
+    adapter = AdapterFactory.create(
+        provider="openai", client=sdk_client, default_model="gpt-4"
+    )
 
     # Wrap it in a ClientNode (tracks identity and health)
-    node = ClientNode("key-1", client)
+    node = ClientNode("sk-your-key-here", adapter)
 
     # Create a provider (represents a service like OpenAI)
     provider = ProviderRouter("openai", [node])
@@ -112,7 +115,6 @@ async def main():
     # Make a request
     response = await router.chat(prompt="Hello, what's 2+2?")
     print(response)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -134,20 +136,22 @@ pytest tests/ -v
 import asyncio
 from openai import AsyncOpenAI
 from llmrouterx import LLMRouter
+from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 
-
 async def main():
+    # Wrap the SDK client in adapter + ClientNode
     client = AsyncOpenAI(api_key="sk-...")
-    node = ClientNode("sk-...", client)
+    adapter = AdapterFactory.create(provider="openai", client=client, default_model="gpt-4")
+    node = ClientNode("sk-...", adapter)
+
     provider = ProviderRouter("openai", [node])
     composite = CompositeRouter([provider])
     router = LLMRouter(composite)
 
     response = await router.chat(prompt="Hello!")
     print(response)
-
 
 asyncio.run(main())
 ```
@@ -160,14 +164,17 @@ asyncio.run(main())
 import asyncio
 from openai import AsyncOpenAI
 from llmrouterx import LLMRouter
+from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
-
 async def main():
     keys = ["sk-key1", "sk-key2", "sk-key3"]
-    nodes = [ClientNode(key, AsyncOpenAI(api_key=key)) for key in keys]
+    nodes = [
+        ClientNode(key, AdapterFactory.create(provider="openai", client=AsyncOpenAI(api_key=key), default_model="gpt-4"))
+        for key in keys
+    ]
 
     # LeastBusyScheduler rotates across keys, avoiding rate limits
     provider = ProviderRouter("openai", nodes, scheduler=LeastBusyScheduler())
@@ -176,7 +183,6 @@ async def main():
 
     response = await router.chat(prompt="Hello!")
     print(response)
-
 
 asyncio.run(main())
 ```
@@ -190,19 +196,27 @@ import asyncio
 from openai import AsyncOpenAI
 from groq import AsyncGroq
 from llmrouterx import LLMRouter
+from llmrouterx.adapters import AdapterFactory
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
-
 async def main():
+    def node(provider, sdk, key):
+        adapter = AdapterFactory.create(provider=provider, client=sdk, default_model="gpt-4")
+        return ClientNode(key, adapter)
+
     # Primary: OpenAI
-    openai_node = ClientNode("sk-...", AsyncOpenAI(api_key="sk-..."))
-    openai_provider = ProviderRouter("openai", [openai_node], scheduler=LeastBusyScheduler())
+    openai_provider = ProviderRouter(
+        "openai", [node("openai", AsyncOpenAI(api_key="sk-..."), "sk-...")],
+        scheduler=LeastBusyScheduler(),
+    )
 
     # Fallback: Groq
-    groq_node = ClientNode("gsk-...", AsyncGroq(api_key="gsk-..."))
-    groq_provider = ProviderRouter("groq", [groq_node], scheduler=LeastBusyScheduler())
+    groq_provider = ProviderRouter(
+        "groq", [node("groq", AsyncGroq(api_key="gsk-..."), "gsk-...")],
+        scheduler=LeastBusyScheduler(),
+    )
 
     # CompositeRouter tries providers in order; if first fails, tries next
     composite = CompositeRouter([openai_provider, groq_provider])
@@ -211,7 +225,6 @@ async def main():
     # If OpenAI fails, automatically falls back to Groq
     response = await router.chat(prompt="Hello!")
     print(response)
-
 
 asyncio.run(main())
 ```
@@ -464,10 +477,13 @@ logger.info(
 ## 🔑 Core Concepts
 
 ### ClientNode
-Represents a single LLM client (e.g., one OpenAI API key). Tracks health, active requests, and metadata.
+Represents a single LLM client (e.g., one OpenAI API key). Wraps a provider
+**adapter** (not a raw SDK client) and tracks health, active requests, and
+metadata.
 
 ```python
-node = ClientNode("identifier", client_instance)
+adapter = AdapterFactory.create(provider="openai", client=client_instance, default_model="gpt-4")
+node = ClientNode("identifier", adapter)  # the adapter, not the raw SDK client
 node.weight = 2  # Optional: used by WeightedScheduler
 node.priority = 10  # Optional: used by PriorityScheduler
 ```
@@ -536,6 +552,24 @@ You can also attach your own labels when recording directly:
 ```python
 router.metrics.incr("billing.tokens", amount=512, labels={"tenant": "acme"})
 router.metrics.timing("kv.get", 0.004, labels={"cache": "hit"})
+```
+
+### Token usage
+
+Provider adapters automatically extract token usage from successful responses
+and the router records it as global and per-provider counters:
+
+```python
+m = router.metrics.get()
+print(m["counters"]["tokens.prompt.total"])            # global
+print(m["labeled_counters"]["tokens.total"]["provider=openai"])  # per-provider
+print(m["counters"]["tokens.completion.total"])
+```
+
+To record usage manually (e.g. from a custom adapter):
+
+```python
+router.metrics.track_tokens("openai", prompt_tokens=120, completion_tokens=45)
 ```
 
 ---
@@ -711,13 +745,32 @@ Supported environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLMROUTER_TIMEOUT` | `60` | Per-request client timeout (seconds) |
-| `LLMROUTER_MAX_RETRIES` | `3` | Number of retries per operation |
+| `LLMROUTER_MAX_RETRIES` | `3` | Number of retries per operation (after the initial call) |
 | `LLMROUTER_MAX_CONCURRENT` | `100` | Concurrent requests per API key |
 | `LLMROUTER_MAX_CONCURRENT_REQUESTS` | unset | Global concurrency cap |
 | `LLMROUTER_TOTAL_TIMEOUT` | unset | Hard deadline for the whole operation |
 | `LLMROUTER_CIRCUIT_BREAKER` | `true` | Enable per-key circuit breakers |
 | `LLMROUTER_CB_THRESHOLD` | `5` | Failures before a key opens |
 | `LLMROUTER_CB_RESET_TIMEOUT` | `30` | Cooldown before a key is retried |
+
+### Gateway
+
+Run the OpenAI-compatible HTTP server with auth and observability. Install the
+`server` extra, then configure:
+
+```bash
+pip install llmrouterx[server]
+
+export LLMROUTER_ADMIN_TOKEN=admin-secret       # protects /dashboard, /metrics
+export LLMROUTER_API_KEYS=sk-openai-1,gsk-groq-1  # protects /v1/*
+export LLMROUTER_DOCS=0                         # hide /docs, /redoc
+
+llmrouterx serve --config router.json --no-docs --port 8000
+```
+
+`LLMROUTER_API_KEYS` is comma-separated; each value is accepted as a bearer
+token on `/v1/models` and `/v1/chat/completions`. Omitting these vars leaves
+the gateway open (useful for local dev only). See [docs/SERVER.md](docs/SERVER.md).
 
 ### Loading Config from a JSON File
 
@@ -815,9 +868,11 @@ See [docs/SERVER.md](docs/SERVER.md#4-langfuse-tracing).
 | Problem | Solution |
 |---------|----------|
 | "No healthy providers" | Check the `Failure sequence` in the `NoHealthyClientError` message to see each failing provider/key and its underlying error |
+| 401 / 403 from the gateway | Configure an API key / admin token (set `LLMROUTER_API_KEYS` / `LLMROUTER_ADMIN_TOKEN` or pass `create_app(..., admin_token=, api_keys=)`) |
 | Requests are slow | Use `LeastBusyScheduler`, check metrics for latency outliers |
+| Token counters are 0 | Token usage is extracted automatically from provider responses; custom adapters must call `context.set("usage", {...})` (see `BaseProviderAdapter._record_usage`) |
 | Same key always used | Check that scheduler is set to `RoundRobin` or `LeastBusy` |
-| Errors not retrying | Check `should_retry()` logic in retry policy, some errors are permanent |
+| Errors not retrying | `max_retries=N` allows N retries after the initial call; non-retryable errors (4xx, bad request) are not retried |
 | ModuleNotFoundError: llmrouterx | Run `pip install -e .` if developing from source |
 | Tests hang | Update `setuptools>=45` and run `pip install -e .` again |
 

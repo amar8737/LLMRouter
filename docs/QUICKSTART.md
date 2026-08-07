@@ -308,6 +308,40 @@ curl -X POST localhost:8000/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+### Securing the gateway
+
+By default the gateway is open (handy for local dev). Lock it down for real
+traffic with bearer-token auth:
+
+- **Admin token** for `/dashboard` and `/metrics`.
+- **API keys** for `/v1/*`.
+
+Set them via env (works in multi-worker mode too) or pass flags:
+
+```bash
+export LLMROUTER_ADMIN_TOKEN=admin-secret
+export LLMROUTER_API_KEYS=sk-openai-1,gsk-groq-1,sk-ant-1
+
+llmrouterx serve --config router.json --no-docs
+curl -H "Authorization: Bearer sk-openai-1" \
+  -X POST localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Or programmatically:
+
+```python
+app = create_app(
+    config_path="router.json",
+    admin_token="admin-secret",
+    api_keys=["sk-openai-1", "gsk-groq-1"],
+    docs_enabled=False,
+)
+```
+
+See [SERVER.md](SERVER.md) for the endpoint auth matrix and diagnostic headers.
+
 Or load the config in code:
 
 ```python
@@ -396,11 +430,15 @@ embeddings = await router.embeddings(text="Hello world")
 
 ### Track tokens from provider usage
 
+Tokens are recorded automatically: every adapter extracts `usage` from the
+provider response and the router records it in the global/per-provider token
+counters (`tokens.prompt.total`, `tokens.completion.total`,
+`tokens.total{provider="..."}`). You can also record manually:
+
 ```python
 from llmrouterx.metrics import MetricsCollector
 
 metrics = MetricsCollector()
-# from a provider response's usage block:
 metrics.track_tokens("openai", prompt_tokens=120, completion_tokens=45)
 snapshot = metrics.snapshot()["counters"]
 snapshot["tokens.prompt.total"]          # global prompt tokens
