@@ -64,6 +64,8 @@ class APIKey:
 class APIKeyDatabase:
     """SQLite-backed API key store."""
 
+    _init_lock = threading.Lock()
+
     def __init__(self, db_path: str | os.PathLike[str]):
         self.db_path = Path(db_path)
         self._lock = threading.RLock()
@@ -78,7 +80,8 @@ class APIKeyDatabase:
                 check_same_thread=False,
                 isolation_level=None,  # Autocommit
             )
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            with APIKeyDatabase._init_lock:
+                self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.row_factory = sqlite3.Row
@@ -87,7 +90,8 @@ class APIKeyDatabase:
     def _init_db(self) -> None:
         """Initialize database schema."""
         with self._get_connection() as conn:
-            conn.execute("""
+            with APIKeyDatabase._init_lock:
+                conn.execute("""
                 CREATE TABLE IF NOT EXISTS api_keys (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     key_hash TEXT NOT NULL UNIQUE,
