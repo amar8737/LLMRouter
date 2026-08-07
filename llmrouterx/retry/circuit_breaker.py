@@ -8,7 +8,7 @@ from threading import Lock
 logger = logging.getLogger(__name__)
 
 
-class CircuitState(str, Enum):  # noqa: UP042 — StrEnum requires 3.11+
+class CircuitState(str, Enum):
     CLOSED = "CLOSED"
     OPEN = "OPEN"
     HALF_OPEN = "HALF_OPEN"
