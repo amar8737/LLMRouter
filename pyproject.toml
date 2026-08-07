@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmrouterx"
-version = "0.1.9"
+version = "0.1.11"
 description = "Intelligent routing, load balancing, and failover for LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
