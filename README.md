@@ -29,9 +29,14 @@ response = await router.chat(prompt="Hello!")
 - ⏱️ **Intelligent Scheduling** — Pick the best client (least busy, round-robin, random, weighted, priority)
 - 🔁 **Automatic Retries** — Exponential backoff with jitter for transient failures
 - 📊 **Metrics Collection** — Track requests, errors, latency, throughput, success rates
+- 🏷️ **Labeled Metrics** — Per-provider counters and timings out of the box
 - 🔌 **Extensible Design** — Custom schedulers, retry policies, middleware
-- 🔍 **Health Checks** — Monitor provider availability in real-time
+- 🔍 **Health Checks** — Monitor provider availability in real-time, with timeouts
 - 📡 **Streaming Support** — Stream responses from any provider
+- ⏳ **Total Request Timeout** — Hard deadline covering retries and failover
+- 🚦 **Per-Key Circuit Breakers** — Isolate a failing key without taking down the router
+- 🔁 **Retry Middleware Hook** — `on_retry` lets middleware veto individual retries
+- 📝 **Structured Logging** — Built-in JSON formatter for machine-readable logs
 - 🛡️ **Error Handling** — Graceful degradation with meaningful exceptions
 
 ### Planned Features (v0.2+)
@@ -287,11 +292,14 @@ async def main():
 
     # View metrics
     metrics = router.metrics.get()
-    print("Total requests:", metrics["counters"].get("total_requests", 0))
-    print("Total errors:", metrics["counters"].get("total_errors", 0))
+    print("Total chat requests:", metrics["counters"].get("requests.chat", 0))
+    print("Total errors:", metrics["counters"].get("errors.chat.non_retryable", 0))
     print(
-        "Average latency:",
-        sum(metrics["timings"]) / len(metrics["timings"]) if metrics["timings"] else 0,
+        "Average chat latency:",
+        sum(metrics["timings"].get("latency.chat", []))
+        / len(metrics["timings"].get("latency.chat", []))
+        if metrics["timings"].get("latency.chat", [])
+        else 0,
     )
 
 
@@ -312,12 +320,12 @@ logger = logging.getLogger(__name__)
 
 
 class LoggingMiddleware(BaseMiddleware):
-    async def before_request(self, op, payload):
-        logger.info(f"→ {op}: {payload}")
+    async def before_request(self, operation, payload, context):
+        logger.info("→ %s [%s]: %s", operation, context.request_id, payload)
         return payload
 
-    async def after_response(self, op, payload, response):
-        logger.info(f"← {op}: response received")
+    async def after_response(self, operation, payload, response, context):
+        logger.info("← %s [%s]: response received", operation, context.request_id)
         return response
 
 
@@ -386,6 +394,67 @@ asyncio.run(main())
 
 ---
 
+### Example 12: Total Request Timeout
+
+A hard deadline that covers the whole operation, including retries and
+failover. Raise `asyncio.TimeoutError` when the budget is exhausted instead of
+letting a slow provider consume all retries:
+
+```python
+import asyncio
+from llmrouterx import LLMRouter
+
+router = LLMRouter(composite, total_timeout=30.0)
+
+try:
+    response = await router.chat(prompt="Hello!")
+except asyncio.TimeoutError:
+    print("Operation took longer than 30s and was cancelled.")
+```
+
+---
+
+### Example 13: Retry Middleware Hook
+
+`on_retry` runs before every retry. Return `False` to veto the retry (e.g. for
+idempotency or cost control); return `True` to allow it. Errors raised inside
+the hook are logged and treated as `True` so observers can never break retry
+handling:
+
+```python
+from llmrouterx.middleware import BaseMiddleware
+
+
+class RateLimitAwareMiddleware(BaseMiddleware):
+    async def on_retry(self, operation, payload, exception, attempt, context):
+        # Never burn retries on a dead API key.
+        if getattr(exception, "status_code", None) == 401:
+            return False
+        return True
+
+
+router = LLMRouter(composite, middleware=[RateLimitAwareMiddleware()])
+```
+
+---
+
+### Example 14: Structured (JSON) Logging
+
+```python
+import logging
+from llmrouterx.utils import setup_logging
+
+setup_logging(level=logging.INFO, fmt="json")  # one-line JSON records on stderr
+
+logger = logging.getLogger("llmrouterx")
+logger.info(
+    "routed",
+    extra={"_llmrouterx_extra": {"request_id": ctx.request_id, "provider": "openai"}},
+)
+```
+
+---
+
 ## 🔑 Core Concepts
 
 ### ClientNode
@@ -433,15 +502,34 @@ router = LLMRouter(
 Track performance across your LLM infrastructure:
 
 ```python
-metrics = router.metrics.get()
+metrics = router.metrics.get()  # alias for .snapshot()
 
 # Counters
-print(metrics["counters"]["total_requests"])
-print(metrics["counters"]["total_errors"])
-print(metrics["counters"]["total_successes"])
+print(metrics["counters"]["requests.chat"])
+print(metrics["counters"]["errors.chat.retries_exhausted"])
 
-# Timings (list of request latencies in seconds)
-print(metrics["timings"])  # [0.45, 0.52, 0.38, ...]
+# Timings (bounded list of request latencies in seconds)
+print(metrics["timings"]["latency.chat"])  # [0.45, 0.52, 0.38, ...]
+
+# Labeled metrics (per-provider breakdown)
+print(metrics["labeled_counters"]["requests.chat"])
+# {"provider=openai": 12, "provider=groq": 4}
+```
+
+The router automatically records labeled `requests.<op>` / `latency.<op>`
+metrics keyed by the provider that served the request. Compute summary
+statistics for a timing series with `timing_stats`:
+
+```python
+stats = router.metrics.timing_stats("latency.chat")
+print(stats)  # {"count": 10, "min": ..., "mean": ..., "p95": ..., "p99": ...}
+```
+
+You can also attach your own labels when recording directly:
+
+```python
+router.metrics.incr("billing.tokens", amount=512, labels={"tenant": "acme"})
+router.metrics.timing("kv.get", 0.004, labels={"cache": "hit"})
 ```
 
 ---
@@ -473,13 +561,17 @@ from llmrouterx.middleware import BaseMiddleware
 
 
 class MyMiddleware(BaseMiddleware):
-    async def before_request(self, op, payload):
+    async def before_request(self, operation, payload, context):
         # Modify request before sending
         return payload
 
-    async def after_response(self, op, payload, response):
+    async def after_response(self, operation, payload, response, context):
         # Transform response after receiving
         return response
+
+    async def on_retry(self, operation, payload, exception, attempt, context):
+        # Veto a retry by returning False
+        return True
 
 
 router = LLMRouter(composite, middleware=[MyMiddleware()])
@@ -511,7 +603,18 @@ pytest tests/ -v
 
 ### Run Specific Test
 ```bash
-pytest tests/test_streaming.py -v
+pytest tests/test_retry_middleware_and_timeouts.py -v
+```
+
+### Coverage Report
+```bash
+pytest tests/ --cov=llmrouterx --cov-report=term-missing
+```
+
+### Static Checks
+```bash
+ruff check . && ruff format --check .   # lint + format
+mypy                                   # type check the llmrouterx package
 ```
 
 ### Run Smoke Test
@@ -559,12 +662,13 @@ router = LLMRouter(composite)
 ```python
 from llmrouterx import LLMRouter
 from llmrouterx.retry import ExponentialRetry
+from llmrouterx.metrics import MetricsCollector
 from llmrouterx.middleware import BaseMiddleware
 
 
 class LogMiddleware(BaseMiddleware):
-    async def before_request(self, op, payload):
-        print(f"Sending: {op}")
+    async def before_request(self, operation, payload, context):
+        print(f"Sending: {operation}")
         return payload
 
 
@@ -573,9 +677,41 @@ retry = ExponentialRetry(max_retries=5, base=1.0, factor=2.0)
 router = LLMRouter(
     composite,
     retry=retry,
+    metrics=MetricsCollector(max_samples=5000),
     middleware=[LogMiddleware()],
-    # Additional config options as needed
+    max_retries=5,
+    max_concurrent_requests=50,
+    total_timeout=30.0,
 )
+```
+
+The same options are available declaratively through `RouterConfig`, built from
+a dict or environment variables, and assembled with `RouterFactory`:
+
+```python
+import os
+from llmrouterx.config import RouterConfig
+from llmrouterx.router.factory import RouterFactory
+
+config = RouterConfig.from_env()  # reads LLMROUTER_* environment variables
+# or
+config = RouterConfig(providers=[...], max_retries=5, total_timeout=30.0)
+
+router = RouterFactory.build(config)
+```
+
+Supported environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLMROUTER_TIMEOUT` | `60` | Per-request client timeout (seconds) |
+| `LLMROUTER_MAX_RETRIES` | `3` | Number of retries per operation |
+| `LLMROUTER_MAX_CONCURRENT` | `100` | Concurrent requests per API key |
+| `LLMROUTER_MAX_CONCURRENT_REQUESTS` | unset | Global concurrency cap |
+| `LLMROUTER_TOTAL_TIMEOUT` | unset | Hard deadline for the whole operation |
+| `LLMROUTER_CIRCUIT_BREAKER` | `true` | Enable per-key circuit breakers |
+| `LLMROUTER_CB_THRESHOLD` | `5` | Failures before a key opens |
+| `LLMROUTER_CB_RESET_TIMEOUT` | `30` | Cooldown before a key is retried |
 ```
 
 ---
@@ -599,20 +735,37 @@ router = LLMRouter(
 
 ```python
 class LLMRouter:
-    def __init__(self, composite, retry=None, middleware=None):
+    def __init__(
+        self,
+        composite_router: CompositeRouter,
+        *,
+        retry: BaseRetry | None = None,
+        metrics: MetricsCollector | None = None,
+        middleware: list[BaseMiddleware] | None = None,
+        max_retries: int = 3,
+        circuit_breaker: CircuitBreaker | None = None,
+        max_concurrent_requests: int | None = None,
+        total_timeout: float | None = None,
+    ):
         """Initialize router with composite, retry policy, and middleware."""
-    
+
     async def chat(self, prompt: str, **kwargs) -> str:
         """Send chat request to best available provider."""
-    
-    async def stream(self, prompt: str, **kwargs):
+
+    async def stream(self, prompt: str, **kwargs) -> AsyncGenerator[str, None]:
         """Stream response chunks from best available provider."""
-    
+
     async def embeddings(self, text: str, **kwargs) -> list:
         """Get embeddings from best available provider."""
-    
+
+    async def responses(self, *args, **kwargs):
+        """Call the provider's Responses API, when supported."""
+
+    async def close(self, timeout: float = 10.0) -> None:
+        """Wait for in-flight tasks, then cancel and await leftovers."""
+
     def get_metrics(self) -> dict:
-        """Return metrics (counters and timings)."""
+        """Return metrics snapshot (counters, timings, labeled variants)."""
 ```
 
 ### CompositeRouter
@@ -621,12 +774,23 @@ class LLMRouter:
 class CompositeRouter:
     def __init__(self, providers: list):
         """Initialize with list of ProviderRouters."""
-    
-    async def select(self) -> ProviderRouter:
-        """Select best provider, trying in order."""
-    
+
+    async def handle(self, op, payload, **kwargs):
+        """Try providers in order; fall back to the next on failure."""
+
+    async def health(self, timeout: float = 5.0) -> list:
+        """Check every provider with a per-provider timeout."""
+
     async def is_healthy(self) -> bool:
         """Check if any provider is healthy."""
+
+    @property
+    def last_provider(self) -> str | None:
+        """Name of the provider that served the last request."""
+
+    @property
+    def last_api_key(self) -> str | None:
+        """API key that served the last request (masked nowhere, use with care)."""
 ```
 
 ### ProviderRouter
@@ -635,29 +799,51 @@ class CompositeRouter:
 class ProviderRouter:
     def __init__(self, name: str, clients: list, scheduler=None):
         """Initialize provider with name, clients, and scheduler."""
-    
+
     async def select_client(self) -> ClientNode:
         """Select best client using scheduler."""
-    
+
     async def is_healthy(self) -> bool:
         """Check if any client is healthy."""
+
+    @property
+    def last_api_key(self) -> str | None:
+        """API key that served the last request."""
 ```
 
 ### ClientNode
 
 ```python
 class ClientNode:
-    def __init__(self, identifier: str, client):
+    def __init__(
+        self,
+        api_key: str,
+        client: BaseProviderAdapter,
+        *,
+        streaming: StreamingManager | None = None,
+        timeout: float | None = 60.0,
+        max_concurrent: int = 100,
+        failure_threshold: int | None = None,
+        cooldown_seconds: float | None = None,
+        circuit_breaker_enabled: bool = True,
+        weight: float = 1.0,
+        priority: int = 100,
+        count_transient_failures: bool = False,
+    ):
         """Initialize with identifier and client instance."""
-    
-    async def is_healthy(self) -> bool:
+
+    async def is_healthy(self, force: bool = False) -> bool:
         """Check if client is healthy."""
-    
-    def increment_active(self) -> None:
-        """Increment active request count."""
-    
-    def decrement_active(self) -> None:
-        """Decrement active request count."""
+
+    async def send(self, op, payload, **kwargs):
+        """Dispatch a request, respecting timeouts and concurrency slots."""
+
+    async def stream(self, prompt, **kwargs) -> AsyncGenerator[str, None]:
+        """Stream tokens while holding a concurrency slot."""
+
+    @property
+    def is_saturated(self) -> bool:
+        """True when every concurrency slot is in use."""
 ```
 
 ---
@@ -675,20 +861,21 @@ We welcome contributions! Here's how to get started:
 7. **Open a PR** with a clear description
 
 ### Development Checklist
-- [ ] Code follows style guidelines (use `black` or `autopep8`)
+- [ ] Code follows style guidelines (`ruff check . && ruff format --check .`)
+- [ ] Type checks pass (`mypy`)
 - [ ] Tests pass (`pytest tests/ -v`)
 - [ ] New features include tests
 - [ ] Documentation is updated
 - [ ] Commit messages are descriptive
 
 ### Areas for Contribution
-- ✅ Cost-aware routing
-- ✅ Latency-aware routing  
-- ✅ Response caching
-- ✅ Prometheus metrics export
-- ✅ Additional provider support
-- ✅ Performance optimizations
-- ✅ Documentation and examples
+- Cost-aware routing
+- Latency-aware routing
+- Response caching
+- Prometheus metrics export
+- Additional provider support
+- Performance optimizations
+- Documentation and examples
 
 ---
 
@@ -720,6 +907,10 @@ Built with ❤️ for developers managing multiple LLM providers. Special thanks
 - Schedulers (round-robin, least-busy, random, weighted, priority)
 - Retry logic
 - Metrics collection
+- Per-key circuit breakers
+- Streaming + graceful shutdown
+- Total request timeouts
+- Retry middleware hook, labeled metrics, structured logging
 
 **v0.2** (Planned)
 - Cost-aware routing

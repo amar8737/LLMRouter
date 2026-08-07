@@ -72,7 +72,12 @@ def test_reset_clears_everything():
     m.incr("a")
     m.timing("latency.chat", 0.5)
     m.reset()
-    assert m.snapshot() == {"counters": {}, "timings": {}}
+    assert m.snapshot() == {
+        "counters": {},
+        "labeled_counters": {},
+        "timings": {},
+        "labeled_timings": {},
+    }
 
 
 def test_request_context_generates_unique_ids():

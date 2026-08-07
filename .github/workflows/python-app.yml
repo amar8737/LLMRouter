@@ -28,6 +28,12 @@ jobs:
         echo "Checking ruff formatting..."
         ruff format --check .
 
+    - name: Type check with mypy
+      run: |
+        pip install mypy
+        echo "Running mypy..."
+        mypy llmrouterx
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -55,4 +61,5 @@ jobs:
       timeout-minutes: 10
       run: |
         python -m pytest -v --tb=short
+        python -m pytest --cov=llmrouterx --cov-report=term-missing
         python tests/run_tests.py

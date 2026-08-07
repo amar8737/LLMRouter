@@ -99,4 +99,5 @@ class RouterFactory:
             max_retries=config.max_retries,
             circuit_breaker=None,
             max_concurrent_requests=config.max_concurrent_requests,
+            total_timeout=config.total_timeout,
         )

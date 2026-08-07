@@ -29,6 +29,17 @@ class CompositeRouter:
     ) -> None:
         self.providers = providers
         self.metrics = metrics
+        self.last_provider: str | None = None
+
+    @property
+    def last_api_key(self) -> str | None:
+        """API key of the provider that most recently handled a request."""
+        if self.last_provider is None:
+            return None
+        for provider in self.providers:
+            if getattr(provider, "name", None) == self.last_provider:
+                return getattr(provider, "last_api_key", None)
+        return None
 
     async def handle(
         self,
@@ -52,6 +63,8 @@ class CompositeRouter:
                     payload,
                     **kwargs,
                 )
+
+                self.last_provider = provider_name
 
                 if self.metrics:
                     self.metrics.incr(f"provider.success.{provider_name}")
@@ -92,13 +105,20 @@ class CompositeRouter:
 
         raise NoHealthyClientError("No healthy providers available.")
 
-    async def health(self) -> dict[str, bool]:
+    async def health(
+        self,
+        *,
+        timeout: float | None = 5.0,
+    ) -> dict[str, bool]:
         """Return a ``{provider_name: is_healthy}`` map."""
         result: dict[str, bool] = {}
         for provider in self.providers:
             name = getattr(provider, "name", provider.__class__.__name__)
             try:
-                result[name] = await provider.is_healthy()
+                coro = provider.is_healthy()
+                if timeout is not None:
+                    coro = asyncio.wait_for(coro, timeout=timeout)
+                result[name] = await coro
             except Exception:
                 result[name] = False
         return result

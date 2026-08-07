@@ -18,6 +18,10 @@ class NoHealthyClientError(ProviderError):
     pass
 
 
+class StreamError(ProviderError):
+    """Raised when no provider/client can produce a streamed response."""
+
+
 class ConfigurationError(RouterError):
     pass
 

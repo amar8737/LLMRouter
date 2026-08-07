@@ -25,9 +25,9 @@ PYTHONPATH=. python3 tests/run_tests.py
 ```python
 import asyncio
 from openai import AsyncOpenAI
-from llmrouter import LLMRouter
-from llmrouter.client import ClientNode
-from llmrouter.providers import ProviderRouter, CompositeRouter
+from llmrouterx import LLMRouter
+from llmrouterx.client import ClientNode
+from llmrouterx.providers import ProviderRouter, CompositeRouter
 
 
 async def main():
@@ -51,10 +51,10 @@ asyncio.run(main())
 ```python
 import asyncio
 from openai import AsyncOpenAI
-from llmrouter import LLMRouter
-from llmrouter.client import ClientNode
-from llmrouter.providers import ProviderRouter, CompositeRouter
-from llmrouter.scheduler import LeastBusyScheduler
+from llmrouterx import LLMRouter
+from llmrouterx.client import ClientNode
+from llmrouterx.providers import ProviderRouter, CompositeRouter
+from llmrouterx.scheduler import LeastBusyScheduler
 
 
 async def main():
@@ -84,10 +84,10 @@ asyncio.run(main())
 import asyncio
 from openai import AsyncOpenAI
 from groq import AsyncGroq
-from llmrouter import LLMRouter
-from llmrouter.client import ClientNode
-from llmrouter.providers import ProviderRouter, CompositeRouter
-from llmrouter.scheduler import LeastBusyScheduler
+from llmrouterx import LLMRouter
+from llmrouterx.client import ClientNode
+from llmrouterx.providers import ProviderRouter, CompositeRouter
+from llmrouterx.scheduler import LeastBusyScheduler
 
 
 async def main():
@@ -116,7 +116,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from llmrouter import LLMRouter
+from llmrouterx import LLMRouter
 
 
 async def main():
@@ -137,7 +137,7 @@ asyncio.run(main())
 ## 5. Custom Scheduling (Priority)
 
 ```python
-from llmrouter.scheduler import BaseScheduler
+from llmrouterx.scheduler import BaseScheduler
 
 
 class PriorityScheduler(BaseScheduler):
@@ -167,20 +167,20 @@ provider = ProviderRouter(
 
 ```python
 import logging
-from llmrouter.middleware import BaseMiddleware
-from llmrouter import LLMRouter
+from llmrouterx.middleware import BaseMiddleware
+from llmrouterx import LLMRouter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class LoggingMiddleware(BaseMiddleware):
-    async def before_request(self, op, payload):
-        logger.info(f"→ {op}: {payload}")
+    async def before_request(self, operation, payload, context):
+        logger.info(f"→ {operation}: {payload}")
         return payload
 
-    async def after_response(self, op, payload, response):
-        logger.info(f"← {op}: {response}")
+    async def after_response(self, operation, payload, response, context):
+        logger.info(f"← {operation}: {response}")
         return response
 
 
@@ -192,8 +192,8 @@ router = LLMRouter(composite, middleware=[LoggingMiddleware()])
 ## 7. Retry Policy
 
 ```python
-from llmrouter.retry import ExponentialRetry
-from llmrouter import LLMRouter
+from llmrouterx.retry import ExponentialRetry
+from llmrouterx import LLMRouter
 
 # Retry with exponential backoff
 retry = ExponentialRetry(
@@ -212,7 +212,7 @@ router = LLMRouter(composite, retry=retry)
 
 ```python
 import asyncio
-from llmrouter import LLMRouter
+from llmrouterx import LLMRouter
 
 
 async def main():
@@ -237,8 +237,8 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from llmrouter import LLMRouter
-from llmrouter.exceptions import NoHealthyClientError
+from llmrouterx import LLMRouter
+from llmrouterx.exceptions import NoHealthyClientError
 
 
 async def main():
@@ -260,7 +260,7 @@ asyncio.run(main())
 ## 10. All Schedulers
 
 ```python
-from llmrouter.scheduler import (
+from llmrouterx.scheduler import (
     LeastBusyScheduler,  # Pick client with fewest active requests
     RoundRobinScheduler,  # Rotate through clients
     RandomScheduler,  # Pick random client
@@ -305,7 +305,7 @@ embeddings = await router.embeddings(text="Hello world")
 
 ```python
 class MyMiddleware(BaseMiddleware):
-    async def after_response(self, op, payload, response):
+    async def after_response(self, operation, payload, response, context):
         # Transform response
         if "data" in response:
             response["transformed"] = response["data"]
@@ -338,7 +338,7 @@ pytest tests/ -v
 # Your own test
 # Put this in test_my_router.py:
 import pytest
-from llmrouter import LLMRouter
+from llmrouterx import LLMRouter
 
 @pytest.mark.asyncio
 async def test_chat():

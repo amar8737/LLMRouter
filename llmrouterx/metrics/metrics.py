@@ -31,7 +31,13 @@ class MetricsCollector:
 
         self._counters: dict[str, int] = {}
 
+        self._labeled_counters: dict[str, dict[str, int]] = defaultdict(dict)
+
         self._timings: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=max_samples))
+
+        self._labeled_timings: dict[str, dict[str, deque[float]]] = defaultdict(
+            lambda: defaultdict(lambda: deque(maxlen=max_samples))
+        )
 
     # -------------------------------------------------------
     # Counters
@@ -41,6 +47,7 @@ class MetricsCollector:
         self,
         key: str,
         amount: int = 1,
+        labels: dict[str, str] | None = None,
     ) -> None:
 
         with self._lock:
@@ -55,6 +62,20 @@ class MetricsCollector:
                     self._max_counter_keys,
                 )
 
+            if labels:
+                label_key = _serialize_labels(labels)
+                if label_key not in self._labeled_counters[key]:
+                    if len(self._labeled_counters[key]) < self._max_counter_keys:
+                        self._labeled_counters[key][label_key] = amount
+                    else:
+                        logger.warning(
+                            "Labeled counter '%s' dropped: max %d label sets reached.",
+                            key,
+                            self._max_counter_keys,
+                        )
+                else:
+                    self._labeled_counters[key][label_key] += amount
+
     # -------------------------------------------------------
     # Timings
     # -------------------------------------------------------
@@ -63,10 +84,15 @@ class MetricsCollector:
         self,
         key: str,
         seconds: float,
+        labels: dict[str, str] | None = None,
     ) -> None:
 
         with self._lock:
             self._timings[key].append(seconds)
+
+            if labels:
+                label_key = _serialize_labels(labels)
+                self._labeled_timings[key][label_key].append(seconds)
 
     # -------------------------------------------------------
     # Snapshot
@@ -77,7 +103,14 @@ class MetricsCollector:
         with self._lock:
             return {
                 "counters": dict(self._counters),
+                "labeled_counters": {
+                    key: dict(values) for key, values in self._labeled_counters.items()
+                },
                 "timings": {key: list(values) for key, values in self._timings.items()},
+                "labeled_timings": {
+                    key: {label: list(values) for label, values in values_by_label.items()}
+                    for key, values_by_label in self._labeled_timings.items()
+                },
             }
 
     # Backward compatibility
@@ -131,4 +164,13 @@ class MetricsCollector:
         with self._lock:
             self._counters.clear()
 
+            self._labeled_counters.clear()
+
             self._timings.clear()
+
+            self._labeled_timings.clear()
+
+
+def _serialize_labels(labels: dict[str, str]) -> str:
+    """Stable, order-independent string form of a label set."""
+    return ",".join(f"{key}={labels[key]}" for key in sorted(labels))

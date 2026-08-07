@@ -9,7 +9,7 @@ from typing import Any
 
 from ..config.config import RouterConfig
 from ..context import RequestContext
-from ..exceptions import NoHealthyClientError
+from ..exceptions import NoHealthyClientError, StreamError
 from ..metrics.metrics import MetricsCollector
 from ..middleware.base import BaseMiddleware, MiddlewareResult
 from ..providers.composite_router import CompositeRouter
@@ -45,6 +45,7 @@ class LLMRouter:
         max_retries: int = 3,
         circuit_breaker: CircuitBreaker | None = None,
         max_concurrent_requests: int | None = None,
+        total_timeout: float | None = None,
     ) -> None:
         self._router = composite_router
 
@@ -62,6 +63,11 @@ class LLMRouter:
         self._request_semaphore = (
             asyncio.Semaphore(max_concurrent_requests) if max_concurrent_requests else None
         )
+
+        if total_timeout is not None and total_timeout <= 0:
+            raise ValueError("total_timeout must be > 0, or None to disable.")
+
+        self._total_timeout = total_timeout
         self._closed = False
 
     # --------------------------------------------------------
@@ -162,6 +168,34 @@ class LLMRouter:
                     type(middleware).__name__,
                 )
 
+    async def _on_retry(
+        self,
+        op: str,
+        payload: dict[str, Any],
+        exc: BaseException,
+        attempt: int,
+        context: RequestContext,
+    ) -> bool:
+        """
+        Consult middleware about whether to retry a failed attempt.
+
+        Every hook returns a bool; if any returns ``False`` the retry is
+        cancelled. Errors raised by a hook are logged and treated as ``True``
+        so an observer can never accidentally disable retries.
+        """
+        for middleware in self.middleware:
+            try:
+                if not await middleware.on_retry(op, payload, exc, attempt, context):
+                    return False
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Middleware %s.on_retry raised; assuming retry.",
+                    type(middleware).__name__,
+                )
+        return True
+
     async def _track(self, coro) -> Any:
         """
         Run a request coroutine as a tracked task so graceful shutdown
@@ -220,16 +254,32 @@ class LLMRouter:
             return short_circuit
 
         started = time.perf_counter()
+        deadline = started + self._total_timeout if self._total_timeout is not None else None
 
         attempt = 0
 
         try:
             while True:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    self.metrics.incr(f"errors.{op}.total_timeout")
+                    raise asyncio.TimeoutError(
+                        f"'{op}' exceeded total_timeout={self._total_timeout}s"
+                    )
+
                 try:
                     response = await self._router.handle(
                         op,
                         payload,
                     )
+
+                    context.provider = self._router.last_provider
+                    context.api_key = self._router.last_api_key
+
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        self.metrics.incr(f"errors.{op}.total_timeout")
+                        raise asyncio.TimeoutError(
+                            f"'{op}' exceeded total_timeout={self._total_timeout}s"
+                        )
 
                     response = await self._after(
                         op,
@@ -240,8 +290,11 @@ class LLMRouter:
 
                     elapsed = time.perf_counter() - started
 
-                    self.metrics.incr(f"requests.{op}")
-                    self.metrics.timing(f"latency.{op}", elapsed)
+                    labels = (
+                        {"provider": context.provider} if context.provider is not None else None
+                    )
+                    self.metrics.incr(f"requests.{op}", labels=labels)
+                    self.metrics.timing(f"latency.{op}", elapsed, labels=labels)
 
                     if self._circuit_breaker:
                         self._circuit_breaker.record_success()
@@ -268,9 +321,19 @@ class LLMRouter:
                 except RETRYABLE_EXCEPTIONS as exc:
                     attempt += 1
                     self.metrics.incr(f"errors.{op}")
+
+                    # Never retry once the overall deadline has elapsed.
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        self.metrics.incr(f"errors.{op}.total_timeout")
+                        raise asyncio.TimeoutError(
+                            f"'{op}' exceeded total_timeout={self._total_timeout}s"
+                        ) from exc
+
                     await self._on_exception(op, payload, exc, context)
 
                     should_retry = self.retry.should_retry(exc, attempt)
+                    if should_retry:
+                        should_retry = await self._on_retry(op, payload, exc, attempt, context)
 
                     if not should_retry:
                         logger.error(
@@ -449,7 +512,7 @@ class LLMRouter:
                 except Exception as exc:
                     self.metrics.incr("errors.stream")
                     await self._on_exception("stream", payload, exc, context)
-                    raise
+                    raise StreamError(f"Stream failed: {exc}") from exc
 
                 else:
                     self.metrics.incr("requests.stream")

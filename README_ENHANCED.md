@@ -40,8 +40,13 @@ response = await router.chat(prompt="Hello!")
 - 🔑 **API key pooling** — Rotate across multiple keys to avoid rate limits
 - ⏱️ **Intelligent scheduling** — Pick the best client (least busy, round-robin, etc.)
 - 🔁 **Automatic retries** — Exponential backoff with jitter
+- 🚦 **Per-key circuit breakers** — Isolate a failing key
+- ⏳ **Total request timeouts** — Hard deadline across retries and failover
 - 📊 **Metrics collection** — Track requests, errors, latency, throughput
+- 🏷️ **Labeled metrics** — Per-provider counters and timings
+- 📝 **Structured logging** — JSON formatter included
 - 🔌 **Extensible design** — Custom schedulers, retry policies, middleware
+- 📡 **Streaming support** — Async and synchronous streaming with graceful shutdown
 
 🚀 **Planned Features (v0.2+)**
 - 📈 Cost-aware routing (pick cheapest provider)
@@ -55,9 +60,9 @@ response = await router.chat(prompt="Hello!")
 
 ## Installation
 
-### From PyPI (coming soon)
+### From PyPI
 ```bash
-pip install llmrouter
+pip install llmrouterx
 ```
 
 ### From source (development)
@@ -66,12 +71,11 @@ git clone https://github.com/amar8737/LLMRouter.git
 cd LLMRouter
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .[dev]
 ```
 
 ### Requirements
-- Python 3.8+
-- `aiohttp` or `httpx` (for making HTTP requests)
+- Python 3.10+ (tested on 3.10, 3.11, 3.12)
 - No external LLM SDKs required (you provide the client)
 
 ---
@@ -87,10 +91,10 @@ python3 tests/run_tests.py  # Run smoke test
 ### 2. Create a minimal example
 ```python
 import asyncio
-from llmrouter import LLMRouter
-from llmrouter.client import ClientNode
-from llmrouter.providers import ProviderRouter, CompositeRouter, StubClient
-from llmrouter.scheduler import RoundRobinScheduler
+from llmrouterx import LLMRouter
+from llmrouterx.client import ClientNode
+from llmrouterx.providers import ProviderRouter, CompositeRouter, StubClient
+from llmrouterx.scheduler import RoundRobinScheduler
 
 
 async def main():
@@ -119,4 +123,4 @@ See `docs/QUICKSTART.md` for copy-paste examples including multiple providers, r
 
 ## Contributing
 
-Please follow standard GitHub workflows: fork, create a branch, implement changes, add tests, and open a PR. See `llmrouter_code_review.md` for high-priority fixes and roadmap for v0.2.
+Please follow standard GitHub workflows: fork, create a branch, implement changes, add tests, and open a PR. See `docs/` for guides and the [README](README.md) for the roadmap.

@@ -82,3 +82,21 @@ class BaseMiddleware:
         Observe a failed attempt. Raising here replaces the original error.
         """
         return None
+
+    async def on_retry(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        exception: BaseException,
+        attempt: int,
+        context: RequestContext,
+    ) -> bool:
+        """
+        Decide whether a retryable failure should actually be retried.
+
+        ``attempt`` is 1-based: it is ``1`` on the first retry. Return ``False``
+        to cancel the retry and let the failure propagate to the caller.
+        Errors raised here are logged and treated as ``True`` so an observer
+        can never accidentally break retry handling.
+        """
+        return True

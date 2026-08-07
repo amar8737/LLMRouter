@@ -15,6 +15,12 @@ class SyncStreamEngine:
 
     This class runs the async stream in a background thread and
     exposes a synchronous generator.
+
+    .. note::
+        Each active stream spawns one daemon thread running its own event
+        loop. This is convenient for interactive use but does not scale to a
+        high number of concurrent synchronous streams — prefer the async
+        ``StreamingManager.stream`` API in servers and batch jobs.
     """
 
     def __init__(

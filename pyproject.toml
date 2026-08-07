@@ -31,7 +31,9 @@ Tracker = "https://github.com/amar8737/LLMRouter/issues"
 dev = [
 	"pytest",
 	"pytest-asyncio",
+	"pytest-cov",
 	"ruff",
+	"mypy",
 ]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
@@ -42,6 +44,23 @@ python_files = ["test_*.py", "run_tests.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["llmrouterx"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+omit = ["tests/*"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["llmrouterx"]
+warn_unreachable = true
+no_implicit_optional = true
+show_error_codes = true
+check_untyped_defs = false
 
 [tool.ruff]
 line-length = 100

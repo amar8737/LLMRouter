@@ -52,6 +52,7 @@ class ClientNode:
         circuit_breaker_enabled: bool = True,
         weight: float = 1.0,
         priority: int = 100,
+        count_transient_failures: bool = False,
     ) -> None:
         if max_concurrent < 1:
             raise ConfigurationError("max_concurrent must be >= 1.")
@@ -72,6 +73,11 @@ class ClientNode:
         self.cooldown_seconds = (
             self.COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
         )
+
+        # When True, transient HTTP errors (429/5xx) also count toward the
+        # failure threshold. Off by default so a busy-but-alive provider is
+        # not circuit-broken purely from retryable load.
+        self.count_transient_failures = count_transient_failures
 
         # Per-key circuit breaker. Health is evaluated per client so that one
         # broken provider/key does not take down the whole router.
@@ -133,7 +139,7 @@ class ClientNode:
             now = _utcnow()
 
             if self.circuit_breaker_enabled and self.circuit_breaker.state == CircuitState.OPEN:
-                if now < self.cooldown_until:
+                if self.cooldown_until is not None and now < self.cooldown_until:
                     return False
                 self.cooldown_until = None
                 self.failures = 0
@@ -230,6 +236,8 @@ class ClientNode:
                     exc.status_code,
                     self.api_key[-4:] if self.api_key else "????",
                 )
+                if self.count_transient_failures:
+                    await self._record_failure()
                 raise
             await self._record_failure()
             raise
@@ -375,7 +383,7 @@ class ClientNode:
             )
 
             if stream_timeout is not None:
-                gen = source.__aiter__()
+                gen = source.__aiter__()  # type: ignore[union-attr]
                 while True:
                     try:
                         token = await asyncio.wait_for(
@@ -386,12 +394,12 @@ class ClientNode:
                     except StopAsyncIteration:
                         return
             else:
-                async for token in source:
+                async for token in source:  # type: ignore[union-attr]
                     yield token
         finally:
             if source is not None:
                 with suppress(Exception):
-                    await source.aclose()
+                    await source.aclose()  # type: ignore[union-attr]
             await self.release()
 
     def __repr__(self) -> str:

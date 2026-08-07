@@ -24,6 +24,7 @@ class ProviderRouter:
         self.name = name
         self.clients = clients or []
         self.scheduler = scheduler
+        self.last_api_key: str | None = None
 
     async def is_healthy(self) -> bool:
         """Returns True if at least one client is healthy."""
@@ -46,6 +47,10 @@ class ProviderRouter:
     ) -> dict[str, Any]:
         """
         Route with retry logic for TOCTOU races.
+
+        The scheduler retry loop only guards against a client dying between
+        selection and dispatch. It fails fast (no backoff here) so the
+        router-level retry policy owns backoff and retry decisions.
         """
         if self.scheduler is not None:
             max_scheduler_retries = 3
@@ -58,7 +63,9 @@ class ProviderRouter:
                     if client is None:
                         raise NoHealthyClientError(f"No healthy client for provider '{self.name}'")
 
-                    return await client.send(op, payload, **kwargs)
+                    result = await client.send(op, payload, **kwargs)
+                    self.last_api_key = getattr(client, "api_key", None)
+                    return result
 
                 except asyncio.CancelledError:
                     raise
@@ -78,15 +85,13 @@ class ProviderRouter:
                     if attempt == max_scheduler_retries - 1:
                         raise
 
-                    # Back off briefly before re-selecting so a transient
-                    # failure does not hammer the same client.
-                    await asyncio.sleep(0.1 * (attempt + 1))
-
         for client in self.clients:
             if not await client.is_healthy():
                 continue
 
-            return await client.send(op, payload, **kwargs)
+            result = await client.send(op, payload, **kwargs)
+            self.last_api_key = getattr(client, "api_key", None)
+            return result
 
         raise NoHealthyClientError(f"No healthy client available for provider '{self.name}'")
 

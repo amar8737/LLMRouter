@@ -27,6 +27,8 @@ class RouterConfig:
 
     max_concurrent_requests: int | None = None
 
+    total_timeout: float | None = None
+
     enable_circuit_breaker: bool = True
 
     circuit_breaker_threshold: int = 5
@@ -57,6 +59,7 @@ class RouterConfig:
             max_concurrent_requests=(
                 int(os.getenv("LLMROUTER_MAX_CONCURRENT_REQUESTS", "0")) or None
             ),
+            total_timeout=(float(os.getenv("LLMROUTER_TOTAL_TIMEOUT", "0")) or None),
             enable_circuit_breaker=(
                 os.getenv("LLMROUTER_CIRCUIT_BREAKER", "true").lower() != "false"
             ),
@@ -79,6 +82,9 @@ class RouterConfig:
 
         if self.max_concurrent_requests is not None and self.max_concurrent_requests <= 0:
             raise ValueError("max_concurrent_requests must be > 0 or None.")
+
+        if self.total_timeout is not None and self.total_timeout <= 0:
+            raise ValueError("total_timeout must be > 0 or None.")
 
         if self.circuit_breaker_threshold < 1:
             raise ValueError("circuit_breaker_threshold must be >= 1.")
@@ -104,6 +110,7 @@ class RouterConfig:
             "max_retries": self.max_retries,
             "max_concurrent_per_key": self.max_concurrent_per_key,
             "max_concurrent_requests": self.max_concurrent_requests,
+            "total_timeout": self.total_timeout,
             "enable_circuit_breaker": self.enable_circuit_breaker,
             "circuit_breaker_threshold": self.circuit_breaker_threshold,
             "circuit_breaker_reset_timeout": self.circuit_breaker_reset_timeout,
@@ -111,4 +118,4 @@ class RouterConfig:
 
         values.update(updates)
 
-        return RouterConfig(**values)
+        return RouterConfig(**values)  # type: ignore[arg-type]

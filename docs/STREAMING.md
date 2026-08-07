@@ -1,64 +1,39 @@
-# Streaming Approaches: Side-by-Side Comparison
+# Streaming: Async, Synchronous, and Callback Approaches
 
-This document compares three streaming approaches you can use with LLMRouter:
+LLMRouter supports streaming in three styles. Pick the one that matches your
+application:
 
-- Async generator streaming — best for FastAPI and async applications
-- Synchronous (blocking) streaming — best for CLI and scripts
-- Callback-based streaming — best for GUI apps (Tkinter, PyQt)
+- **Async generator streaming** — best for FastAPI and async applications
+- **Synchronous (blocking) streaming** — best for CLI and scripts
+- **Callback-based streaming** — best for GUI apps (Tkinter, PyQt)
 
-The examples below assume the `StreamingLLMRouter` implemented in `llmrouter.router.streaming`.
+Two layers exist:
 
----
-
-## Problem
-
-Original LLMRouter:
-
-- ✅ Works with async/await
-- ❌ No streaming (waits for entire response)
-- ❌ Can't use in blocking code
-- ❌ No real-time output
-
-```py
-# Old way - blocks until response is complete
-response = await router.handle_request("Explain AI")
-print(response)  # Nothing printed for several seconds
-```
-
+- `LLMRouter.stream()` — the high-level router API. It picks a provider, holds
+  a concurrency slot, and streams tokens. Failover happens *before* the first
+  token; retries are intentionally **not** applied to streams (switching
+  providers mid-stream would duplicate output).
+- `StreamingManager` (`llmrouterx.streaming`) — the lower-level engine used by
+  the router. It wraps a single provider adapter and adds sync wrappers,
+  callbacks, tokenization, and cancellation.
 
 ---
 
-## Solution 1: Async Generator Streaming
+## 1. Async Generator Streaming
 
-Best for: FastAPI, async applications, modern Python 3.8+
+Best for: FastAPI, async applications.
 
-### Before (No Streaming)
+### Using the router
 
-```py
+```python
 import asyncio
-from llmrouter import LLMRouter
+from llmrouterx import LLMRouter
+
+router = LLMRouter(composite)
 
 
 async def main():
-    router = LLMRouter(...)
-    # Blocks until complete response
-    response = await router.handle_request("Explain AI in 100 words")
-    print(response)
-
-
-asyncio.run(main())
-```
-
-### After (Async Streaming)
-
-```py
-import asyncio
-from llmrouter.router.streaming import StreamingLLMRouter
-
-
-async def main():
-    router = StreamingLLMRouter(composite)
-    async for token in router.stream("Explain AI in 100 words"):
+    async for token in router.stream(prompt="Explain AI in 100 words"):
         print(token, end="", flush=True)
     print()
 
@@ -66,147 +41,64 @@ async def main():
 asyncio.run(main())
 ```
 
-Benefit: real-time output, responsive UI.
+### Using StreamingManager directly
 
-Key usage:
-
-- `async for token in router.stream(prompt)` — incremental tokens
-- `await router.stream_until_complete(prompt)` — gather and return full text
-
-
----
-
-## Solution 2: Synchronous Streaming
-
-Best for: CLI tools, scripts, non-async code
-
-### Before (Blocking, No Streaming)
-
-```py
-from llmrouter import LLMRouter
-
-
-def main():
-    router = LLMRouter(...)
-    response = router.handle_request_sync("Explain AI")
-    print(response)
-
-
-main()
-```
-
-### After (Sync Streaming)
-
-```py
-from llmrouter.router.streaming import StreamingLLMRouter
-
-
-def main():
-    router = StreamingLLMRouter(composite)
-    # Use a `stop_event` to cancel long-running streams from another thread.
-    import threading
-
-    stop_event = threading.Event()
-
-    for token in router.stream_sync("Explain AI", stop_event=stop_event):
-        print(token, end="", flush=True)
-    print()
-
-
-main()
-```
-
-Note: `stream_sync()` is a wrapper that runs the async stream flow and yields tokens synchronously. For true sub-second incremental streaming with provider-driven chunks you need provider clients that expose streaming APIs.
-
-
----
-
-## Solution 3: Callback-Based Streaming
-
-Best for: GUI applications, event handlers, PyQt/Tkinter
-
-### GUI before (blocks)
-
-```py
-import tkinter as tk
-
-
-class AIApp:
-    def __init__(self):
-        self.window = tk.Tk()
-        self.text_widget = tk.Text(self.window)
-        self.text_widget.pack()
-
-    def ask_ai(self):
-        response = router.handle_request_sync("...")
-        self.text_widget.insert(tk.END, response)
-
-
-app = AIApp()
-```
-
-### GUI after (non-blocking with callbacks)
-
-```py
-import tkinter as tk
+```python
 import asyncio
+from llmrouterx.streaming import StreamingManager
+from llmrouterx.adapters import AdapterFactory
+
+adapter = AdapterFactory.create(
+    provider="openai",
+    client=client,  # e.g. AsyncOpenAI(...)
+    default_model="gpt-4",
+)
+manager = StreamingManager(adapter)
 
 
-class AIApp:
-    def __init__(self):
-        self.window = tk.Tk()
-        self.text_widget = tk.Text(self.window)
-        self.text_widget.pack()
-        self.router = StreamingLLMRouter(composite)
+async def main():
+    text = await manager.stream_to_text("Explain AI", on_chunk=lambda t: print(t, end=""))
+    print()
+    print(text)
 
-    def on_token(self, token):
-        self.text_widget.insert(tk.END, token)
-        self.text_widget.update()
 
-    def ask_ai(self):
-        asyncio.run(self._stream_response())
-
-    async def _stream_response(self):
-        async for token in self.router.stream("Explain AI", on_chunk=self.on_token):
-            pass
+asyncio.run(main())
 ```
-
-Result: GUI stays responsive, text updates in real-time.
-
 
 ---
 
-## Real-World Example: Chat CLI (sync streaming)
+## 2. Synchronous Streaming
 
-```py
-#!/usr/bin/env python
-from llmrouter.router.streaming import StreamingLLMRouter
+Best for: CLI tools, scripts, and non-async code.
 
-router = StreamingLLMRouter(composite)
+> **Note:** Each active synchronous stream runs on its own daemon thread with a
+> private event loop. This is convenient for interactive use but does not
+> scale to many concurrent streams — prefer `StreamingManager.stream()` (async)
+> in servers and batch jobs.
 
-while True:
-    user_input = input("You: ")
-    if user_input.lower() == "quit":
-        break
-    print("Bot: ", end="", flush=True)
-    # Streams tokens
-    for token in router.stream_sync(user_input):
-        print(token, end="", flush=True)
-    print()
+```python
+from llmrouterx.streaming import StreamingManager
+
+manager = StreamingManager(adapter)
+
+for token in manager.stream_sync("Explain AI"):
+    print(token, end="", flush=True)
+print()
 ```
 
-Example with stop_event (cancel from another thread):
+To cancel a long-running stream from another thread, pass a `threading.Event`:
 
-```py
+```python
 import threading
-from llmrouter.router.streaming import StreamingLLMRouter
+from llmrouterx.streaming import AsyncStreamEngine, SyncStreamEngine
 
-router = StreamingLLMRouter(composite)
+engine = SyncStreamEngine(AsyncStreamEngine(adapter))
+
 stop_event = threading.Event()
 
 
 def run_stream():
-    for token in router.stream_sync("Explain AI", stop_event=stop_event):
+    for token in engine.stream("Explain AI", stop_event=stop_event):
         print(token, end="", flush=True)
 
 
@@ -217,19 +109,75 @@ stop_event.set()
 thread.join()
 ```
 
+---
+
+## 3. Callback-Based Streaming
+
+Best for: GUI applications and event handlers.
+
+### Tkinter example
+
+```python
+import asyncio
+import tkinter as tk
+
+
+class AIApp:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.text_widget = tk.Text(self.window)
+        self.text_widget.pack()
+
+    def on_token(self, token):
+        self.text_widget.insert(tk.END, token)
+        self.text_widget.update()
+
+    def ask_ai(self):
+        asyncio.run(self._stream_response())
+
+    async def _stream_response(self):
+        async for token in manager.stream("Explain AI", on_chunk=self.on_token):
+            pass
+
+
+app = AIApp()
+```
+
+`on_chunk` is also honored by the sync engine, so the same callback works with
+`stream_sync(...)`.
 
 ---
 
-## Real-World Example: FastAPI SSE endpoint (async streaming)
+## 4. Real-World Example: Chat CLI (sync streaming)
 
-```py
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from llmrouter.router.streaming import StreamingLLMRouter
+```python
+from llmrouterx.streaming import StreamingManager
+
+manager = StreamingManager(adapter)
+
+while True:
+    user_input = input("You: ")
+    if user_input.lower() == "quit":
+        break
+    print("Bot: ", end="", flush=True)
+    for token in manager.stream_sync(user_input):
+        print(token, end="", flush=True)
+    print()
+```
+
+---
+
+## 5. Real-World Example: FastAPI SSE Endpoint (async streaming)
+
+```python
 import json
 
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from llmrouterx import LLMRouter
+
 app = FastAPI()
-router = StreamingLLMRouter(composite)
+router = LLMRouter(composite)
 
 
 @app.post("/chat/stream")
@@ -241,120 +189,86 @@ async def chat_stream(prompt: str):
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
-Frontend can consume SSE and append tokens as they arrive.
+The frontend consumes the SSE stream and appends tokens as they arrive.
 
 ---
 
-## Provider wiring examples (OpenAI)
+## 6. Provider Wiring
 
-Below are minimal wiring examples showing how to hook an OpenAI-style client into the router.
+Provider adapters implement `BaseProviderAdapter.stream(prompt, *, model, **kwargs)`
+and yield string tokens. Adapters are constructed with `AdapterFactory.create()`
+and attached to a router through `ClientNode` + `ProviderRouter`, or used
+directly via `StreamingManager`.
 
-Async OpenAI-style client (pseudo-code):
+```python
+from llmrouterx.adapters import AdapterFactory
 
-```py
-from openai import AsyncOpenAI
-from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
-
-client = AsyncOpenAI(api_key="sk-...")
-router = ExtendedStreamingLLMRouter({"openai": {"client": client, "default_model": "gpt-4"}})
-
-# The router will try to call `client.request(..., stream=True)` and consume
-# an async iterator of chunks when available. Adapt to your client API.
-async for token in router.chat_stream("Explain AI"):
-    print(token, end="", flush=True)
+adapter = AdapterFactory.create(
+    provider="openai",
+    client=AsyncOpenAI(api_key="sk-..."),
+    default_model="gpt-4",
+)
 ```
 
-Sync OpenAI-style client (pseudo-code):
+```python
+from llmrouterx.client import ClientNode
+from llmrouterx.providers import ProviderRouter, CompositeRouter
+from llmrouterx.streaming import StreamingManager
 
-```py
-from openai import OpenAI
-from llmrouter.router.extended_streaming import ExtendedStreamingLLMRouter
-
-client = OpenAI(api_key="sk-...")  # hypothetical sync client
-router = ExtendedStreamingLLMRouter({"openai": {"client": client}})
-
-for token in router.chat_stream_sync("Explain AI"):
-    print(token, end="", flush=True)
+node = ClientNode(
+    "sk-...",
+    adapter,
+    streaming=StreamingManager(adapter),
+)
+provider = ProviderRouter("openai", [node])
+composite = CompositeRouter([provider])
+router = LLMRouter(composite)
 ```
 
-Note: SDK method names and shapes vary — the router looks for a `client.request(op, payload, stream=True)`
-that returns an async iterator, or falls back to awaiting a full response and tokenizing it.
-
+If an adapter does not expose a real streaming API, tokenization fallbacks
+(whitespace / character) simulate streaming — useful for a streaming UI, but
+not true low-latency chunks.
 
 ---
 
-## Comparison Table
+## 7. Comparison Table
 
 | Feature | Async Generator | Sync Streaming | Callback |
 |---|---:|---:|---:|
 | Use Case | FastAPI, async apps | CLI, scripts | GUI, event handlers |
 | Syntax | `async for token in stream()` | `for token in stream_sync()` | `on_chunk=callback` |
 | Blocking | No | Yes (blocking wrapper) | No |
-| Threading | Single async loop | Uses `asyncio.run` internally | Single async loop |
+| Threading | Single async loop | One thread per stream | Single async loop |
 | Complexity | Medium | Low | Medium |
 | Performance | High (if provider streams) | Medium | High |
 | GUI Compatibility | No | No | Yes |
 
+---
+
+## 8. Common Mistakes & Fixes
+
+- Forgetting `flush=True` when printing tokens.
+- Storing all tokens in memory (use unbounded lists only for short responses).
+- Not catching exceptions during streaming — partial output plus graceful
+  failure is better than a crash.
+- Leaving a `router.stream()` generator open — `close()` it early to release
+  the concurrency slot and stop the provider stream.
+- Treating the sync engine as thread-safe — one `SyncStreamEngine.stream`
+  call per thread.
 
 ---
 
-## Token Streaming Performance (notes)
+## 9. Testing Streaming
 
-- Provider-driven streaming is the most efficient and lowest-latency approach — work with provider clients that implement streaming.
-- Tokenization fallbacks (word/sentence splitting) are useful when provider does not stream, but they provide a simulated streaming UI rather than true low-latency chunks.
-
-
----
-
-## Integration Patterns
-
-### Gradual migration
-
-1. Keep `LLMRouter` for non-streaming code path.
-2. Add `StreamingLLMRouter` in parallel and switch critical paths.
-3. Migrate handlers to streaming gradually.
-
-### Wrapper
-
-Provide a small wrapper API that hides streaming vs non-streaming:
-
-```py
-async def ask_ai(prompt: str, stream: bool = True):
-    if stream:
-        resp = ""
-        async for token in router.stream(prompt):
-            print(token, end="", flush=True)
-            resp += token
-        return resp
-    else:
-        return await router.handle_request(prompt)
-```
-
+See `tests/test_streaming_shutdown.py` and `tests/test_streaming_components.py`
+for tests covering async generators, sync wrappers, callbacks, and graceful
+shutdown.
 
 ---
 
-## Common mistakes & fixes
+## Next Steps
 
-- Forgetting `flush=True` when printing tokens
-- Storing all tokens in memory (unbounded lists)
-- Not catching exceptions during streaming (partial output plus graceful failure is better)
-
-
----
-
-## Testing streaming
-
-See `tests/test_streaming.py` for unit tests that verify async generator, callback and sync wrappers.
-
-
----
-
-## Next steps
-
-- Wire true provider-level streaming (clients provide `stream` or an async iterator). See `llmrouter.router.streaming` for the current fallback implementation.
-- Add examples for major providers showing how to hook provider streaming APIs.
-
-
----
-
-File created from a side-by-side comparison provided by the project owner. If you want this mirrored into `README_ENHANCED.md` or linked from the top-level `README.md`, I can update those next.
+- Wire true provider-level streaming by implementing
+  `BaseProviderAdapter.stream()` for each provider SDK you use.
+- Use `StreamingManager.tokenize()` and custom tokenizers for simulated
+  streaming fallbacks.

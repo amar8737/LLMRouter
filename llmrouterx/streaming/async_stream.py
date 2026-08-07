@@ -37,7 +37,7 @@ class AsyncStreamEngine:
         Stream tokens from the provider.
         """
 
-        async for token in self._adapter.stream(
+        async for token in self._adapter.stream(  # type: ignore[attr-defined]
             prompt,
             model=model,
             **kwargs,
