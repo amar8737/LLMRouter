@@ -5,7 +5,6 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
-from datetime import datetime, timezone
 from typing import Any
 
 from ..config.config import RouterConfig
@@ -14,7 +13,9 @@ from ..exceptions import NoHealthyClientError
 from ..metrics.metrics import MetricsCollector
 from ..middleware.base import BaseMiddleware, MiddlewareResult
 from ..providers.composite_router import CompositeRouter
+from ..retry.circuit_breaker import CircuitBreaker
 from ..retry.exponential import ExponentialRetry, HTTPError
+from ..utils.cancellation import cancel_tasks_and_wait
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ class LLMRouter:
         metrics: MetricsCollector | None = None,
         middleware: list[BaseMiddleware] | None = None,
         max_retries: int = 3,
+        circuit_breaker: CircuitBreaker | None = None,
+        max_concurrent_requests: int | None = None,
     ) -> None:
         self._router = composite_router
 
@@ -48,6 +51,14 @@ class LLMRouter:
         self.metrics = metrics or MetricsCollector()
 
         self.middleware = list(middleware or [])
+
+        self._circuit_breaker = circuit_breaker
+
+        self._active_tasks: set[asyncio.Task] = set()
+        self._request_semaphore = (
+            asyncio.Semaphore(max_concurrent_requests) if max_concurrent_requests else None
+        )
+        self._closed = False
 
     # --------------------------------------------------------
     # Middleware
@@ -158,6 +169,16 @@ class LLMRouter:
         context: RequestContext | None = None,
     ) -> Any:
 
+        if self._closed:
+            raise RuntimeError("Router has been shut down.")
+
+        if self._circuit_breaker and not self._circuit_breaker.allow_request():
+            raise NoHealthyClientError(
+                "Circuit breaker is open — requests are temporarily rejected."
+            )
+
+        if self._request_semaphore:
+            await self._request_semaphore.acquire()
         context = context or RequestContext(
             operation=op,
             prompt=payload.get("prompt"),
@@ -170,92 +191,106 @@ class LLMRouter:
         if short_circuit is not None:
             self.metrics.incr(f"middleware.short_circuit.{op}")
             context.finish()
+            if self._request_semaphore:
+                self._request_semaphore.release()
             return short_circuit
 
         started = time.perf_counter()
 
         attempt = 0
 
-        while True:
+        try:
+            while True:
 
-            try:
+                try:
 
-                response = await self._router.handle(
-                    op,
-                    payload,
-                )
-
-                response = await self._after(
-                    op,
-                    payload,
-                    response,
-                    context,
-                )
-
-                elapsed = time.perf_counter() - started
-
-                self.metrics.incr(f"requests.{op}")
-                self.metrics.timing(f"latency.{op}", elapsed)
-
-                context.finish()
-
-                return response
-
-            except asyncio.CancelledError:
-                self.metrics.incr(f"cancelled.{op}")
-                raise
-
-            except NoHealthyClientError as exc:
-                self.metrics.incr(f"errors.{op}.no_healthy_clients")
-                logger.error("No healthy clients for '%s'", op)
-                raise
-
-            except RETRYABLE_EXCEPTIONS as exc:
-                attempt += 1
-                self.metrics.incr(f"errors.{op}")
-
-                should_retry = self.retry.should_retry(exc, attempt)
-
-                if not should_retry:
-                    logger.error(
-                        "Max retries exceeded for '%s': %s",
+                    response = await self._router.handle(
                         op,
-                        str(exc),
+                        payload,
                     )
-                    self.metrics.incr(f"errors.{op}.retries_exhausted")
+
+                    response = await self._after(
+                        op,
+                        payload,
+                        response,
+                        context,
+                    )
+
+                    elapsed = time.perf_counter() - started
+
+                    self.metrics.incr(f"requests.{op}")
+                    self.metrics.timing(f"latency.{op}", elapsed)
+
+                    if self._circuit_breaker:
+                        self._circuit_breaker.record_success()
+
+                    context.finish()
+
+                    return response
+
+                except asyncio.CancelledError:
+                    self.metrics.incr(f"cancelled.{op}")
                     raise
 
-                delay = self.retry.get_backoff(exc, attempt)
-                logger.warning(
-                    "Retrying '%s' (attempt %d, delay=%.2fs): %s",
-                    op,
-                    attempt,
-                    delay,
-                    str(exc),
-                )
+                except NoHealthyClientError:
+                    self.metrics.incr(f"errors.{op}.no_healthy_clients")
+                    logger.error(
+                        "No healthy clients for '%s' [req_id=%s]",
+                        op,
+                        context.request_id,
+                    )
+                    if self._circuit_breaker:
+                        self._circuit_breaker.record_failure()
+                    raise
 
-                with suppress(Exception):
-                    self.metrics.timing(f"retry.backoff.{op}", delay)
+                except RETRYABLE_EXCEPTIONS as exc:
+                    attempt += 1
+                    self.metrics.incr(f"errors.{op}")
 
-                await self.retry.wait(exc, attempt)
+                    should_retry = self.retry.should_retry(exc, attempt)
 
-            except Exception as exc:
-                self.metrics.incr(f"errors.{op}.non_retryable")
-                logger.exception(
-                    "Non-retryable error in '%s': %s",
-                    op,
-                    exc.__class__.__name__,
-                )
-                raise
+                    if not should_retry:
+                        logger.error(
+                            "Max retries exceeded for '%s' [req_id=%s]: %s",
+                            op,
+                            context.request_id,
+                            str(exc),
+                        )
+                        self.metrics.incr(f"errors.{op}.retries_exhausted")
+                        if self._circuit_breaker:
+                            self._circuit_breaker.record_failure()
+                        raise
 
-            except Exception as exc:
-                self.metrics.incr(f"errors.{op}.non_retryable")
-                logger.exception(
-                    "Non-retryable error in '%s': %s",
-                    op,
-                    exc.__class__.__name__,
-                )
-                raise
+                    delay = self.retry.get_backoff(exc, attempt)
+                    logger.warning(
+                        "Retrying '%s' [req_id=%s] (attempt %d, delay=%.2fs): %s",
+                        op,
+                        context.request_id,
+                        attempt,
+                        delay,
+                        str(exc),
+                    )
+
+                    with suppress(Exception):
+                        self.metrics.timing(f"retry.backoff.{op}", delay)
+
+                    await self.retry.wait(exc, attempt)
+
+                except Exception as exc:
+                    self.metrics.incr(f"errors.{op}.non_retryable")
+                    logger.exception(
+                        "Non-retryable error in '%s' [req_id=%s]: %s",
+                        op,
+                        context.request_id,
+                        exc.__class__.__name__,
+                    )
+                    if self._circuit_breaker:
+                        self._circuit_breaker.record_failure()
+                    raise
+
+        finally:
+            if self._request_semaphore:
+                self._request_semaphore.release()
 
     # --------------------------------------------------------
     # Public API
@@ -427,7 +462,54 @@ class LLMRouter:
         both entry points build identical object graphs.
         """
 
-        # Imported lazily: RouterFactory imports this module.
         from .factory import RouterFactory
 
         return RouterFactory.build(config)
+
+    # --------------------------------------------------------
+    # Lifecycle
+    # --------------------------------------------------------
+
+    async def close(self, timeout: float = 10.0) -> None:
+        """
+        Gracefully shut down the router.
+
+        Waits for in-flight requests to complete (up to ``timeout`` seconds),
+        then cancels any remaining tasks.
+        """
+        self._closed = True
+
+        pending = {t for t in self._active_tasks if not t.done()}
+        if pending:
+            logger.info(
+                "Waiting for %d in-flight request(s) to complete (timeout=%.1fs).",
+                len(pending),
+                timeout,
+            )
+            await cancel_tasks_and_wait(pending, timeout=timeout)
+
+        self._active_tasks.clear()
+        logger.info("Router shut down gracefully.")
+
+    async def __aenter__(self) -> LLMRouter:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
+
+    def _track_task(self, task: asyncio.Task) -> None:
+        """Track an active request task for graceful shutdown."""
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def circuit_breaker(self) -> CircuitBreaker | None:
+        return self._circuit_breaker
+
+    def get_timing_stats(self, key: str) -> dict[str, float]:
+        """Return latency statistics for a given timing key."""
+        return self.metrics.timing_stats(key)

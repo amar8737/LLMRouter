@@ -26,6 +26,7 @@ class AnthropicAdapter(BaseProviderAdapter):
     DEFAULT_MAX_TOKENS = 1024
 
     def _resolve_model(self, model: str | None) -> str:
+
         resolved = model or self.default_model
 
         if not resolved:

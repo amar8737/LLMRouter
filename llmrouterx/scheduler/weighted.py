@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import logging
 import random
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseScheduler
+
+if TYPE_CHECKING:
+    from ..providers.provider_router import ProviderRouter
 
 
 class WeightedScheduler(BaseScheduler):
     """Choose a healthy client randomly weighted by `weight` attribute (default 1)."""
 
-    async def select(self, provider_router):
+    async def select(self, provider_router: ProviderRouter) -> Any:
         clients = provider_router.clients
         if not clients:
             return None

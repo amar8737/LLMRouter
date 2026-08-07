@@ -1,15 +1,21 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseScheduler
 
+if TYPE_CHECKING:
+    from ..providers.provider_router import ProviderRouter
+
 
 class RoundRobinScheduler(BaseScheduler):
-    def __init__(self):
-        self._indices = {}
-        self._locks = {}
+    def __init__(self) -> None:
+        self._indices: dict[str, int] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
-    async def select(self, provider_router):
+    async def select(self, provider_router: ProviderRouter) -> Any:
         clients = provider_router.clients
         if not clients:
             return None

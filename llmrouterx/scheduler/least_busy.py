@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseScheduler
+
+if TYPE_CHECKING:
+    from ..providers.provider_router import ProviderRouter
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +22,7 @@ class LeastBusyScheduler(BaseScheduler):
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
 
-    async def select(self, provider_router):
+    async def select(self, provider_router: ProviderRouter) -> Any:
         async with self._lock:
 
             best = None

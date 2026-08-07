@@ -54,34 +54,6 @@ class StubClient:
             "response": f"Echo from {self.name}: {body}",
         }
 
-    async def chat(self, prompt: str, **kwargs):
-        await asyncio.sleep(0)
-        return {
-            "provider": self.name,
-            "response": f"Chat from {self.name}: {prompt}",
-        }
-
-    async def embeddings(self, text: str, **kwargs):
-        await asyncio.sleep(0)
-        return {
-            "provider": self.name,
-            "response": f"Embeddings from {self.name}: {text}",
-        }
-
-    async def responses(self, *args, **kwargs):
-        await asyncio.sleep(0)
-        return {
-            "provider": self.name,
-            "response": f"Responses from {self.name}",
-        }
-
-    async def stream(self, prompt: str, **kwargs):
-        await asyncio.sleep(0)
-        for part in prompt.split():
-            yield {
-                "provider": self.name,
-                "response": part,
-            }
 
 
 class StubStreamingClient:

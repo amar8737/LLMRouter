@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..adapters.base import BaseProviderAdapter
 from ..exceptions import ConfigurationError
+from ..retry.exponential import ExponentialRetry, HTTPError
 from ..streaming.manager import StreamingManager
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ClientNode:
@@ -97,38 +101,41 @@ class ClientNode:
 
     async def check_health(self, force: bool = False) -> bool:
         """
-        Proactive health check with exponential backoff for recovering clients.
-        
+        Proactive health check with automatic recovery.
+
         Only performs actual health check if:
         1. force is True, or
-        2. Client is currently healthy, or  
-        3. Client has been unhealthy for more than 5x the cooldown period
-        
+        2. Client is in cooldown (to check for recovery), or
+        3. Client has no active requests
+
         Args:
-            force: If True, always perform health check regardless of current state
-            
+            force: If True, always perform health check regardless of state.
+
         Returns:
-            bool: True if client is healthy, False otherwise
+            bool: True if client is healthy, False otherwise.
         """
         async with self._lock:
             now = _utcnow()
-            
-            # If cooldown is active, client is unhealthy
+
             if self.cooldown_until is not None:
                 if now < self.cooldown_until:
                     return False
-                else:
-                    # Cooldown expired, auto-recover
-                    self.cooldown_until = None
-                    self.failures = 0
-                    return True
-            
-            # If client has active requests, trust current health state
-            if self.active_requests > 0:
+                self.cooldown_until = None
+                self.failures = 0
                 return True
-            
-            # Otherwise, client is healthy
-            return True
+
+            if not force and self.active_requests > 0:
+                return True
+
+            try:
+                result = await self.client.health_check()
+                if result:
+                    self.failures = 0
+                return result
+            except Exception:
+                key_suffix = self.api_key[-4:] if self.api_key else "????"
+                logger.exception("Health check failed for key ...%s", key_suffix)
+                return False
 
     @property
     def is_saturated(self) -> bool:
@@ -177,65 +184,56 @@ class ClientNode:
     async def execute(self, coroutine):
         """
         Execute a coroutine with proper resource tracking and error handling.
-        
+
         Ensures that acquire/release pair is atomic - if an exception
         occurs, the slot is returned to the pool.
+
+        Transient HTTP errors (429, 5xx) do not count against client health
+        because they are server-side issues, not client faults.
         """
         await self.acquire()
-        
+
         try:
             return await coroutine
         except asyncio.CancelledError:
-            # A cancelled request is not a provider fault, so it must not
-            # count against this key's health.
             raise
-        except Exception as exc:
-            # Record the failure
+        except HTTPError as exc:
+            if exc.status_code in ExponentialRetry.RETRYABLE_HTTP_STATUS:
+                logger.debug(
+                    "Transient HTTP %d for key ...%s — not penalizing health.",
+                    exc.status_code,
+                    self.api_key[-4:] if self.api_key else "????",
+                )
+                raise
             async with self._lock:
                 self.failures += 1
                 self.last_failure = _utcnow()
-                
                 if self.failures >= self.failure_threshold:
                     self.cooldown_until = _utcnow() + timedelta(
                         seconds=self.cooldown_seconds
                     )
+                    logger.warning(
+                        "Key ...%s put in cooldown after %d failures.",
+                        self.api_key[-4:] if self.api_key else "????",
+                        self.failures,
+                    )
+            raise
+        except Exception:
+            async with self._lock:
+                self.failures += 1
+                self.last_failure = _utcnow()
+                if self.failures >= self.failure_threshold:
+                    self.cooldown_until = _utcnow() + timedelta(
+                        seconds=self.cooldown_seconds
+                    )
+                    logger.warning(
+                        "Key ...%s put in cooldown after %d failures.",
+                        self.api_key[-4:] if self.api_key else "????",
+                        self.failures,
+                    )
             raise
         finally:
             await self.release()
-
-    # ------------------------------------------------------------------
-    # Health
-    # ------------------------------------------------------------------
-
-    async def check_health(self, force: bool = False) -> bool:
-        """
-        Proactive health check with automatic recovery.
-        
-        Ensures clients automatically recover health after cooldown.
-        """
-        async with self._lock:
-            now = _utcnow()
-            
-            # If cooldown is active, client is unhealthy
-            if self.cooldown_until is not None:
-                if now < self.cooldown_until:
-                    return False
-                else:
-                    # Cooldown expired, auto-recover
-                    self.cooldown_until = None
-                    self.failures = 0
-                    return True
-            
-            # If client has active requests, trust current health state
-            if self.active_requests > 0:
-                return True
-            
-            # Otherwise, client is healthy
-            return True
-    # Health bookkeeping
-    # ------------------------------------------------------------------
-
-
 
     # ------------------------------------------------------------------
     # Request
@@ -319,7 +317,14 @@ class ClientNode:
         The concurrency slot is held for the lifetime of the stream. Consumers
         that stop early should close the generator (``aclose()``, or
         ``contextlib.aclosing``) so the slot is returned promptly.
+
+        A per-token timeout (``stream_timeout`` kwarg or the client's
+        ``timeout``) guards against hung streams.
         """
+
+        stream_timeout: float | None = kwargs.pop("stream_timeout", None)
+        if stream_timeout is None:
+            stream_timeout = self.timeout
 
         source = (
             self.streaming.stream(prompt, **kwargs)
@@ -327,8 +332,20 @@ class ClientNode:
             else self.client.stream(prompt, **kwargs)
         )
 
-        async for token in source:
-            yield token
+        if stream_timeout is not None:
+            gen = source.__aiter__()
+            while True:
+                try:
+                    token = await asyncio.wait_for(
+                        gen.__anext__(),
+                        timeout=stream_timeout,
+                    )
+                    yield token
+                except StopAsyncIteration:
+                    return
+        else:
+            async for token in source:
+                yield token
 
     def __repr__(self) -> str:
         return (

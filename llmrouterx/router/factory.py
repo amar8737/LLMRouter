@@ -6,6 +6,7 @@ from ..config.config import RouterConfig
 from ..metrics.metrics import MetricsCollector
 from ..providers.composite_router import CompositeRouter
 from ..providers.provider_router import ProviderRouter
+from ..retry.circuit_breaker import CircuitBreaker
 from ..retry.exponential import ExponentialRetry
 from ..streaming.manager import StreamingManager
 from .llmrouter import LLMRouter
@@ -85,10 +86,19 @@ class RouterFactory:
             metrics=metrics,
         )
 
+        circuit_breaker = None
+        if config.enable_circuit_breaker:
+            circuit_breaker = CircuitBreaker(
+                failure_threshold=config.circuit_breaker_threshold,
+                reset_timeout=config.circuit_breaker_reset_timeout,
+            )
+
         return LLMRouter(
             composite_router=composite,
             retry=retry,
             metrics=metrics,
             middleware=config.middleware,
             max_retries=config.max_retries,
+            circuit_breaker=circuit_breaker,
+            max_concurrent_requests=config.max_concurrent_requests,
         )

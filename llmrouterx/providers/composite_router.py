@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from ..exceptions import NoHealthyClientError
@@ -99,6 +100,44 @@ class CompositeRouter:
         if last_exception is not None:
             raise last_exception
 
-        raise RuntimeError(
-            "No providers configured."
+        raise NoHealthyClientError(
+            "No healthy providers available."
         )
+
+    async def health(self) -> dict[str, bool]:
+        """Return a ``{provider_name: is_healthy}`` map."""
+        result: dict[str, bool] = {}
+        for provider in self.providers:
+            name = getattr(provider, "name", provider.__class__.__name__)
+            try:
+                result[name] = await provider.is_healthy()
+            except Exception:
+                result[name] = False
+        return result
+
+    async def stream(
+        self,
+        prompt: str,
+        **kwargs: Any,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream from the first healthy provider.
+
+        Failover only happens before the first token is emitted.
+        """
+        for provider in self.providers:
+            name = getattr(provider, "name", provider.__class__.__name__)
+            try:
+                async for token in provider.stream(prompt, **kwargs):
+                    yield token
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Provider '%s' stream failed: %s",
+                    name,
+                    str(exc),
+                )
+                continue
+        raise NoHealthyClientError("No healthy providers available for streaming.")

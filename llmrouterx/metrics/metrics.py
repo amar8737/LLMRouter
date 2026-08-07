@@ -1,30 +1,35 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from statistics import mean, median
 from threading import Lock
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
     """
     Thread-safe in-memory metrics collector.
 
-    Keeps a bounded history of timings to avoid
-    unbounded memory growth.
+    Keeps a bounded history of timings and a bounded number of
+    distinct counter keys to avoid unbounded memory growth.
     """
 
     def __init__(
         self,
         *,
         max_samples: int = 1000,
+        max_counter_keys: int = 500,
     ) -> None:
 
         self._lock = Lock()
 
         self._max_samples = max_samples
+        self._max_counter_keys = max_counter_keys
 
-        self._counters: dict[str, int] = defaultdict(int)
+        self._counters: dict[str, int] = {}
 
         self._timings: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=max_samples)
@@ -41,7 +46,16 @@ class MetricsCollector:
     ) -> None:
 
         with self._lock:
-            self._counters[key] += amount
+            if key in self._counters:
+                self._counters[key] += amount
+            elif len(self._counters) < self._max_counter_keys:
+                self._counters[key] = amount
+            else:
+                logger.warning(
+                    "Counter key '%s' dropped: max %d keys reached.",
+                    key,
+                    self._max_counter_keys,
+                )
 
     # -------------------------------------------------------
     # Timings
@@ -112,6 +126,11 @@ class MetricsCollector:
     # -------------------------------------------------------
     # Reset
     # -------------------------------------------------------
+
+    def counter_keys(self) -> int:
+        """Return the number of distinct counter keys currently tracked."""
+        with self._lock:
+            return len(self._counters)
 
     def reset(self) -> None:
 

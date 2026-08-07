@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -95,7 +95,7 @@ class ExponentialRetry:
 
         try:
             retry_date = parsedate_to_datetime(retry_after_header)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             delay = (retry_date - now).total_seconds()
 
             if delay <= 0:

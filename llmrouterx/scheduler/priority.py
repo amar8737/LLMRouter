@@ -1,6 +1,12 @@
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseScheduler
+
+if TYPE_CHECKING:
+    from ..providers.provider_router import ProviderRouter
 
 
 class PriorityScheduler(BaseScheduler):
@@ -10,7 +16,7 @@ class PriorityScheduler(BaseScheduler):
     Among equal priority, choose the least-busy client.
     """
 
-    async def select(self, provider_router):
+    async def select(self, provider_router: ProviderRouter) -> Any:
         clients = provider_router.clients
         if not clients:
             return None
