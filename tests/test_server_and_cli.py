@@ -58,9 +58,11 @@ def test_metrics_endpoint(client):
     response = client.get("/metrics")
     assert response.status_code == 200
     data = response.json()
-    assert "counters" in data
-    assert "requests.chat" in data["counters"]
-    assert data["started_at"] > 0
+    assert "snapshot" in data
+    assert "derived" in data
+    assert "counters" in data["snapshot"]
+    assert "requests.chat" in data["snapshot"]["counters"]
+    assert data["uptime_seconds"] >= 0
 
 
 def test_list_models(client):

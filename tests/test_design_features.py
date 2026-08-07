@@ -202,6 +202,5 @@ def test_dashboard_returns_html(client):
     response = client.get("/dashboard")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "LLMRouter Operations" in response.text
-    assert "/health" in response.text
+    assert "LLMRouter Dashboard" in response.text
     assert "/metrics" in response.text

@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
+from statistics import mean
 from typing import Any, Literal
 
 try:
@@ -383,8 +384,21 @@ def create_app(
     async def metrics(request: Request) -> dict[str, Any]:
         rt: LLMRouter = request.app.state.llm_router
         snapshot = rt.get_metrics()
-        snapshot["started_at"] = start_time
-        return snapshot
+
+        # Compute derived metrics for dashboard
+        provider_health = await rt.health()
+        derived = _aggregate_per_provider(snapshot, rt.providers, provider_health)
+
+        # Collect circuit breaker state
+        circuit_breakers = _collect_circuit_breaker_state(rt.providers)
+
+        return {
+            "snapshot": snapshot,
+            "derived": derived,
+            "circuit_breakers": circuit_breakers,
+            "uptime_seconds": time.monotonic() - start_time,
+            "timestamp": time.time(),
+        }
 
     @app.post(
         "/v1/chat/completions",
@@ -458,53 +472,705 @@ _DASHBOARD_HTML = """\
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LLMRouter Operations</title>
+    <title>LLMRouter Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
     <style>
+        * { box-sizing: border-box; }
         body {
-            font-family: system-ui, sans-serif;
-            background: #121212; color: #e0e0e0; padding: 2rem;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 2rem;
+            margin: 0;
         }
-        h1 { margin-top: 0; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        h1 { margin-top: 0; margin-bottom: 2rem; }
+        h2 { margin: 0 0 1rem; font-size: 16px; }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+        
         .card {
-            background: #1e1e1e; padding: 1.5rem; border-radius: 8px;
-            margin-bottom: 1rem; border: 1px solid #333;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
         }
-        pre {
-            background: #000; padding: 1rem; overflow-x: auto;
-            border-radius: 4px; color: #4af626;
+        
+        .metric {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
         }
-        h2 { margin-top: 0; }
-        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+        .metric-label { font-size: 12px; color: #999; margin-bottom: 8px; }
+        .metric-value { font-size: 28px; font-weight: 500; margin: 0; }
+        .metric-detail { font-size: 12px; color: #999; margin-top: 4px; }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }
+        .status-item-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #4caf50; }
+        .status-item-time { font-size: 12px; color: #999; }
+        
+        .error-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        .error-type { }
+        .error-count { font-weight: 500; }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 1rem;
+        }
+        
+        .latency-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 13px;
+        }
+        .latency-label { flex: 1; }
+        .latency-chart {
+            flex: 2;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0 12px;
+        }
+        .latency-fill { height: 100%; background: linear-gradient(to right, #4caf50, #ff9800); }
+        .latency-value { flex: 0.5; text-align: right; font-weight: 500; }
+        
+        .loading { color: #999; }
+        .error { color: #d32f2f; }
+        .success { color: #4caf50; }
+        
+        @media (max-width: 1200px) {
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+        
+        /* Dark mode support */
+        @media (prefers-color-scheme: dark) {
+            body { background: #121212; color: #e0e0e0; }
+            .card {
+                background: #1e1e1e;
+                border-color: #333;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            }
+            .metric { background: #1e1e1e; border-color: #333; }
+            .metric-label { color: #999; }
+            .metric-detail { color: #999; }
+            .status-item { background: #2d2d2d; }
+            .status-item-time { color: #999; }
+            .error-row { background: #2d2d2d; }
+            .sparkline-card { background: #1e1e1e; border-color: #333; }
+            .sparkline-title { color: #e0e0e0; }
+            .latency-table th { color: #999; }
+            .latency-table th, .latency-table td { border-color: #333; }
+            .loading { color: #999; }
+        }
+        
+        .latency-table {
+            width: 100%;
+            font-size: 13px;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        .latency-table th, .latency-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .latency-table th {
+            font-weight: 500;
+            color: #666;
+        }
+
+        /* Sparkline styles */
+        .sparkline-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .sparkline-card {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .sparkline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        .sparkline-title { font-size: 13px; font-weight: 500; color: #333; }
+        .sparkline-value { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+        .sparkline-canvas { height: 80px; }
     </style>
 </head>
 <body>
-    <h1>LLMRouter Gateway</h1>
+    <h1>LLMRouter Dashboard</h1>
+    
+    <!-- Summary metrics -->
     <div class="grid">
-        <div class="card">
-            <h2>Live Health</h2>
-            <pre id="health-data">Loading...</pre>
+        <div class="metric">
+            <div class="metric-label">Healthy Providers</div>
+            <p class="metric-value" id="healthy-count">-</p>
+            <div class="metric-detail">of <span id="total-providers">-</span></div>
         </div>
-        <div class="card">
-            <h2>Live Metrics</h2>
-            <pre id="metrics-data">Loading...</pre>
+        <div class="metric">
+            <div class="metric-label">Success Rate</div>
+            <p class="metric-value" id="success-rate">-</p>
+            <div class="metric-detail" id="success-detail">-</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Avg Latency</div>
+            <p class="metric-value" id="avg-latency">-</p>
+            <div class="metric-detail" id="latency-detail">-</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Total Requests</div>
+            <p class="metric-value" id="total-requests">-</p>
+            <div class="metric-detail">All time</div>
         </div>
     </div>
+    
+    <!-- Sparklines -->
+    <div class="sparkline-grid" style="margin-top: 1.5rem;">
+        <div class="sparkline-card">
+            <div class="sparkline-header">
+                <span class="sparkline-title">Latency (p50 / p95)</span>
+                <span class="sparkline-value" id="sparkline-latency-value">-</span>
+            </div>
+            <canvas class="sparkline-canvas" id="sparkline-latency"></canvas>
+        </div>
+        <div class="sparkline-card">
+            <div class="sparkline-header">
+                <span class="sparkline-title">Error Rate</span>
+                <span class="sparkline-value" id="sparkline-error-value">-</span>
+            </div>
+            <canvas class="sparkline-canvas" id="sparkline-error-rate"></canvas>
+        </div>
+        <div class="sparkline-card">
+            <div class="sparkline-header">
+                <span class="sparkline-title">Request Rate (req/s)</span>
+                <span class="sparkline-value" id="sparkline-rps-value">-</span>
+            </div>
+            <canvas class="sparkline-canvas" id="sparkline-rps"></canvas>
+        </div>
+    </div>
+    
+    <!-- Main panels -->
+    <div style="margin-top: 2rem;">
+        <div class="grid-2">
+            
+            <!-- Health Panel -->
+            <div class="card">
+                <h2>Provider Health</h2>
+                <div id="health-panel" class="loading">Loading...</div>
+            </div>
+            
+            <!-- Latency Panel -->
+            <div class="card">
+                <h2>Latency (p95)</h2>
+                <div id="latency-panel" class="loading">Loading...</div>
+            </div>
+            
+        </div>
+        
+        <!-- Latency Details -->
+        <div class="card" style="margin-top: 1rem;">
+            <h2>Latency Breakdown (all providers)</h2>
+            <table class="latency-table">
+                <tr>
+                    <th>Min</th>
+                    <th>P50</th>
+                    <th>P95</th>
+                    <th>P99</th>
+                    <th>Mean</th>
+                    <th>Max</th>
+                </tr>
+                <tr>
+                    <td><span id="global-min">-</span>ms</td>
+                    <td><span id="global-p50">-</span>ms</td>
+                    <td><span id="global-p95">-</span>ms</td>
+                    <td><span id="global-p99">-</span>ms</td>
+                    <td><span id="global-mean">-</span>ms</td>
+                    <td><span id="global-max">-</span>ms</td>
+                </tr>
+            </table>
+        </div>
+        
+        <!-- Error Panel -->
+        <div class="card" style="margin-top: 1rem;">
+            <h2>Error Breakdown (all time)</h2>
+            <div id="error-panel" class="loading">Loading...</div>
+        </div>
+        
+        <!-- Circuit Breaker Panel -->
+        <div class="card" style="margin-top: 1rem;">
+            <h2>Circuit Breakers</h2>
+            <div id="circuit-breaker-panel" class="loading">Loading...</div>
+        </div>
+        
+    </div>
+    
     <script>
-        async function poll() {
-            try {
-                const [healthRes, metricsRes] =
-                    await Promise.all([fetch('/health'), fetch('/metrics')]);
-                const health = JSON.stringify(await healthRes.json(), null, 2);
-                const metrics = JSON.stringify(await metricsRes.json(), null, 2);
-                document.getElementById('health-data').textContent = health;
-                document.getElementById('metrics-data').textContent = metrics;
-            } catch (e) {
-                console.error("Polling failed", e);
+        // Dashboard state & polling
+        const Dashboard = {
+            state: {
+                derived: null,
+                health: null,
+                lastUpdate: null,
+                // History for sparklines (max 60 points = 2 minutes at 2s interval)
+                history: {
+                    timestamps: [],
+                    latency_p50: [],
+                    latency_p95: [],
+                    error_rate: [],
+                    request_rate: [],
+                    prev_request_count: 0,
+                    prev_time: null
+                },
+                charts: {}
+            },
+            
+            async fetch() {
+                try {
+                    const [metricsRes, healthRes] = await Promise.all([
+                        fetch('/metrics'),
+                        fetch('/health')
+                    ]);
+                    if (!metricsRes.ok) throw new Error(`HTTP ${metricsRes.status}`);
+                    if (!healthRes.ok) throw new Error(`HTTP ${healthRes.status}`);
+                    
+                    const metricsData = await metricsRes.json();
+                    const healthData = await healthRes.json();
+                    
+                    this.state.derived = metricsData.derived;
+                    this.state.circuitBreakers = metricsData.circuit_breakers || {};
+                    this.state.health = healthData.providers || {};
+                    this.state.lastUpdate = new Date();
+                    this.updateHistory();
+                    this.render();
+                } catch (err) {
+                    console.error('Dashboard fetch failed:', err);
+                    document.getElementById('health-panel').innerHTML = 
+                        '<span class="error">Failed to load metrics</span>';
+                }
+            },
+            
+            updateHistory() {
+                const g = this.state.derived.global;
+                const now = this.state.lastUpdate;
+                
+                // Add timestamp (format as HH:MM:SS)
+                const timeStr = now.toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                });
+                this.state.history.timestamps.push(timeStr);
+                
+                // Latency percentiles
+                this.state.history.latency_p50.push(Math.round(g.latency_stats.p50));
+                this.state.history.latency_p95.push(Math.round(g.latency_stats.p95));
+                
+                // Error rate (percentage)
+                this.state.history.error_rate.push((g.error_rate * 100).toFixed(1));
+                
+                // Request rate (requests per second)
+                let rps = 0;
+                if (this.state.history.prev_request_count > 0 && this.state.history.prev_time) {
+                    const timeDiff = (now - this.state.history.prev_time) / 1000;
+                    const countDiff = g.request_count - this.state.history.prev_request_count;
+                    rps = timeDiff > 0 ? (countDiff / timeDiff).toFixed(1) : 0;
+                }
+                this.state.history.request_rate.push(rps);
+                
+                // Update prev values
+                this.state.history.prev_request_count = g.request_count;
+                this.state.history.prev_time = now;
+                
+                // Keep only last 60 points
+                const MAX_POINTS = 60;
+                const historyKeys = [
+                    'timestamps',
+                    'latency_p50',
+                    'latency_p95',
+                    'error_rate',
+                    'request_rate',
+                ];
+                for (const key of historyKeys) {
+                    if (this.state.history[key].length > MAX_POINTS) {
+                        this.state.history[key].shift();
+                    }
+                }
+                
+                // Initialize or update charts
+                this.initCharts();
+                this.updateCharts();
+            },
+            
+            initCharts() {
+                if (this.state.charts.latency) return; // Already initialized
+                
+                const commonOptions = {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 300 },
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: 'rgba(0,0,0,0.7)',
+                            padding: 8,
+                            titleFont: { size: 11 },
+                            bodyFont: { size: 11 }
+                        }
+                    },
+                    scales: {
+                        x: { display: false },
+                        y: { 
+                            display: false,
+                            beginAtZero: true,
+                            grace: '10%'
+                        }
+                    },
+                    elements: {
+                        line: { tension: 0.3, borderWidth: 2 },
+                        point: { radius: 0, hoverRadius: 4 }
+                    }
+                };
+                
+                // Latency sparkline (p50 + p95)
+                this.state.charts.latency = new Chart(
+                    document.getElementById('sparkline-latency'),
+                    {
+                        type: 'line',
+                        data: {
+                            labels: this.state.history.timestamps,
+                            datasets: [
+                                {
+                                    label: 'p50',
+                                    data: this.state.history.latency_p50,
+                                    borderColor: '#4caf50',
+                                    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                                    fill: true
+                                },
+                                {
+                                    label: 'p95',
+                                    data: this.state.history.latency_p95,
+                                    borderColor: '#ff9800',
+                                    backgroundColor: 'rgba(255, 152, 0, 0.1)',
+                                    fill: true
+                                }
+                            ]
+                        },
+                        options: commonOptions
+                    }
+                );
+                
+                // Error rate sparkline
+                this.state.charts.errorRate = new Chart(
+                    document.getElementById('sparkline-error-rate'),
+                    {
+                        type: 'line',
+                        data: {
+                            labels: this.state.history.timestamps,
+                            datasets: [{
+                                label: 'Error %',
+                                data: this.state.history.error_rate,
+                                borderColor: '#f44336',
+                                backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                                fill: true
+                            }]
+                        },
+                        options: commonOptions
+                    }
+                );
+                
+                // Request rate sparkline
+                this.state.charts.rps = new Chart(
+                    document.getElementById('sparkline-rps'),
+                    {
+                        type: 'line',
+                        data: {
+                            labels: this.state.history.timestamps,
+                            datasets: [{
+                                label: 'req/s',
+                                data: this.state.history.request_rate,
+                                borderColor: '#2196f3',
+                                backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                                fill: true
+                            }]
+                        },
+                        options: commonOptions
+                    }
+                );
+            },
+            
+            updateCharts() {
+                if (!this.state.charts.latency) return;
+                
+                const h = this.state.history;
+                
+                // Update latency chart
+                this.state.charts.latency.data.labels = h.timestamps;
+                this.state.charts.latency.data.datasets[0].data = h.latency_p50;
+                this.state.charts.latency.data.datasets[1].data = h.latency_p95;
+                this.state.charts.latency.update('none');
+                
+                // Update error rate chart
+                this.state.charts.errorRate.data.labels = h.timestamps;
+                this.state.charts.errorRate.data.datasets[0].data = h.error_rate;
+                this.state.charts.errorRate.update('none');
+                
+                // Update RPS chart
+                this.state.charts.rps.data.labels = h.timestamps;
+                this.state.charts.rps.data.datasets[0].data = h.request_rate;
+                this.state.charts.rps.update('none');
+                
+                // Update current values
+                const lastP50 = h.latency_p50.length
+                    ? h.latency_p50[h.latency_p50.length - 1]
+                    : null;
+                const lastP95 = h.latency_p95.length
+                    ? h.latency_p95[h.latency_p95.length - 1]
+                    : null;
+                document.getElementById('sparkline-latency-value').textContent =
+                    lastP50 !== null ? `p50: ${lastP50}ms | p95: ${lastP95}ms` : '-';
+                document.getElementById('sparkline-error-value').textContent =
+                    h.error_rate.length ? `${h.error_rate[h.error_rate.length - 1]}%` : '-';
+                document.getElementById('sparkline-rps-value').textContent =
+                    h.request_rate.length ? `${h.request_rate[h.request_rate.length - 1]}` : '-';
+            },
+            
+            render() {
+                this.renderSummary();
+                this.renderHealth();
+                this.renderLatency();
+                this.renderErrors();
+                this.renderCircuitBreakers();
+            },
+            
+            renderSummary() {
+                const g = this.state.derived.global;
+                
+                document.getElementById('healthy-count').textContent = g.healthy_providers;
+                document.getElementById('total-providers').textContent = g.total_providers;
+                document.getElementById('success-rate').textContent = 
+                    (g.success_rate * 100).toFixed(1) + '%';
+                document.getElementById('success-detail').textContent = 
+                    g.success_count + ' of ' + g.request_count + ' requests';
+                document.getElementById('avg-latency').textContent = 
+                    Math.round(g.latency_stats.mean) + 'ms';
+                document.getElementById('latency-detail').textContent = 
+                    'p95: ' + Math.round(g.latency_stats.p95) + 'ms';
+                document.getElementById('total-requests').textContent = 
+                    g.request_count.toLocaleString();
+            },
+            
+            renderHealth() {
+                const providers = this.state.derived.providers;
+                const health = this.state.health;
+                let html = '';
+                
+                for (const [name, data] of Object.entries(providers)) {
+                    const isHealthy = health[name] === true;
+                    const statusDot = isHealthy 
+                        ? '<span class="status-dot"></span>'
+                        : '<span class="status-dot" style="background: #f44336;"></span>';
+                    const statusText = isHealthy ? 'Healthy' : 'Down';
+                    
+                    html += `
+                        <div class="status-item">
+                            <div class="status-item-name">
+                                ${statusDot}
+                                <span>${name}</span>
+                                <span class="status-badge" style="
+                                    background: ${isHealthy ? '#e8f5e9' : '#fdeaea'};
+                                    color: ${isHealthy ? '#2e7d32' : '#c62828'};
+                                    padding: 2px 8px;
+                                    border-radius: 12px;
+                                    font-size: 11px;
+                                    font-weight: 500;
+                                    margin-left: 8px;
+                                ">${statusText}</span>
+                            </div>
+                            <div class="status-item-time">${data.request_count} requests</div>
+                        </div>
+                    `;
+                }
+                
+                if (!html) html = '<span class="loading">No provider data</span>';
+                
+                document.getElementById('health-panel').innerHTML = html;
+            },
+            
+            renderLatency() {
+                const providers = this.state.derived.providers;
+                const g = this.state.derived.global;
+                
+                let html = '';
+                
+                // Per-provider p95
+                const maxP95 = Math.max(
+                    ...Object.values(providers).map(p => p.latency_stats.p95 || 0)
+                );
+                
+                for (const [name, data] of Object.entries(providers)) {
+                    if (!data.latency_stats.p95) continue;
+                    
+                    const width = (data.latency_stats.p95 / maxP95) * 100;
+                    html += `
+                        <div class="latency-bar">
+                            <div class="latency-label">${name}</div>
+                            <div class="latency-chart">
+                                <div class="latency-fill" style="width: ${width}%;"></div>
+                            </div>
+                            <div class="latency-value">${Math.round(data.latency_stats.p95)}ms</div>
+                        </div>
+                    `;
+                }
+                
+                document.getElementById('latency-panel').innerHTML = html;
+                
+                // Global stats
+                const gs = g.latency_stats;
+                document.getElementById('global-min').textContent = Math.round(gs.min);
+                document.getElementById('global-p50').textContent = Math.round(gs.p50);
+                document.getElementById('global-p95').textContent = Math.round(gs.p95);
+                document.getElementById('global-p99').textContent = Math.round(gs.p99);
+                document.getElementById('global-mean').textContent = Math.round(gs.mean);
+                document.getElementById('global-max').textContent = Math.round(gs.max);
+            },
+            
+            renderErrors() {
+                const g = this.state.derived.global;
+                let html = '';
+                
+                const sortedErrors = Object.entries(g.error_breakdown)
+                    .sort((a, b) => b[1] - a[1]);
+                
+                for (const [type, count] of sortedErrors) {
+                    const pct = g.error_count > 0 
+                        ? ((count / g.error_count) * 100).toFixed(0) 
+                        : 0;
+                    
+                    html += `
+                        <div class="error-row">
+                            <span class="error-type">${type}</span>
+                            <span class="error-count">${count} (${pct}%)</span>
+                        </div>
+                    `;
+                }
+                
+                if (!html) html = '<span class="success">No errors</span>';
+                
+                document.getElementById('error-panel').innerHTML = html;
+            },
+            
+            renderCircuitBreakers() {
+                const cb = this.state.circuitBreakers || {};
+                
+                let html = '';
+                
+                for (const [providerName, clients] of Object.entries(cb)) {
+                    if (!clients || clients.length === 0) continue;
+                    
+                    for (const client of clients) {
+                        const state = client.state || 'UNKNOWN';
+                        const isOpen = state === 'OPEN';
+                        const isHalfOpen = state === 'HALF_OPEN';
+                        const isClosed = state === 'CLOSED';
+                        
+                        let stateClass = 'status-dot';
+                        let stateColor = '#4caf50'; // closed = green
+                        let stateText = 'Closed';
+                        
+                        if (isOpen) {
+                            stateColor = '#f44336'; // red
+                            stateText = 'Open';
+                        } else if (isHalfOpen) {
+                            stateColor = '#ff9800'; // orange
+                            stateText = 'Half-Open';
+                        }
+                        
+                        html += `
+                            <div class="status-item">
+                                <div class="status-item-name">
+                                    <span class="status-dot"
+                                        style="background: ${stateColor};"></span>
+                                    <span>${providerName}</span>
+                                    <span class="status-badge" style="
+                                        background: ${isOpen
+                                            ? '#fdeaea'
+                                            : isHalfOpen
+                                                ? '#fff3e0'
+                                                : '#e8f5e9'};
+                                        color: ${isOpen
+                                            ? '#c62828'
+                                            : isHalfOpen
+                                                ? '#e65100'
+                                                : '#2e7d32'};
+                                        padding: 2px 8px;
+                                        border-radius: 12px;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        margin-left: 8px;
+                                    ">${stateText}</span>
+                                </div>
+                                <div class="status-item-time">
+                                    Key: ...${client.api_key_suffix}
+                                    | Failures: ${client.failure_count}
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+                
+                if (!html) html = '<span class="loading">No circuit breaker data</span>';
+                
+                document.getElementById('circuit-breaker-panel').innerHTML = html;
+            },
+            
+            start() {
+                this.fetch();
+                setInterval(() => this.fetch(), 2000);
             }
-        }
-        poll();
-        setInterval(poll, 2000);
+        };
+        
+        // Start polling on page load
+        document.addEventListener('DOMContentLoaded', () => Dashboard.start());
     </script>
 </body>
 </html>
@@ -520,3 +1186,177 @@ def _flush_observability(router: LLMRouter) -> None:
                 flush()
             except Exception:  # pragma: no cover
                 logger.exception("Observability middleware flush failed.")
+
+
+def _collect_circuit_breaker_state(providers: list[Any]) -> dict[str, Any]:
+    """Collect circuit breaker state from all provider routers and their clients."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for provider in providers:
+        provider_name = getattr(provider, "name", None)
+        if not provider_name:
+            continue
+
+        clients = getattr(provider, "clients", [])
+        if not clients:
+            continue
+
+        result[provider_name] = []
+        for client in clients:
+            cb = getattr(client, "circuit_breaker", None)
+            if cb:
+                result[provider_name].append(
+                    {
+                        "api_key_suffix": getattr(client, "api_key", "")[-4:]
+                        if getattr(client, "api_key", "")
+                        else "unknown",
+                        "state": cb.state.value if hasattr(cb.state, "value") else str(cb.state),
+                        "failure_count": cb.failure_count,
+                        "half_open_calls": getattr(cb, "_half_open_calls", 0),
+                        "half_open_successes": getattr(cb, "_half_open_successes", 0),
+                    }
+                )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dashboard metrics aggregation
+# ---------------------------------------------------------------------------
+
+
+def _compute_percentiles(values: list[float]) -> dict[str, float]:
+    """Compute latency percentiles from a list of float values (seconds)."""
+    if not values:
+        return {}
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    return {
+        "count": n,
+        "min": round(sorted_vals[0] * 1000, 2),
+        "max": round(sorted_vals[-1] * 1000, 2),
+        "mean": round(mean(sorted_vals) * 1000, 2),
+        "median": round(sorted_vals[n // 2] * 1000, 2),
+        "p50": round(sorted_vals[int(n * 0.50)] * 1000, 2),
+        "p95": round(sorted_vals[int(n * 0.95)] * 1000, 2),
+        "p99": round(sorted_vals[int(n * 0.99)] * 1000, 2),
+    }
+
+
+def _aggregate_per_provider(
+    snapshot: dict[str, Any],
+    providers: list[Any],
+    provider_health: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    """
+    Aggregate labeled metrics into per-provider summaries.
+
+    Input: snapshot from MetricsCollector (counters, labeled_counters, timings, labeled_timings)
+    Output: {
+        "providers": {
+            "openai": {
+                "request_count": 10234,
+                "success_count": 10156,
+                "error_count": 78,
+                "error_rate": 0.0076,
+                "success_rate": 0.9924,
+                "latency_stats": {...percentiles...},
+                "error_breakdown": {"rate_limit_error": 35, ...}
+            },
+            ...
+        },
+        "global": {
+            "healthy_providers": 4,
+            "total_providers": 4,
+            "success_rate": 0.987,
+            "latency_stats": {...percentiles...},
+            "total_errors": 662
+        }
+    }
+    """
+    result: dict[str, Any] = {"providers": {}, "global": {}}
+
+    labeled_counters = snapshot.get("labeled_counters", {})
+    labeled_timings = snapshot.get("labeled_timings", {})
+    counters = snapshot.get("counters", {})
+    timings = snapshot.get("timings", {})
+
+    # -----------------------------------------------------------------------
+    # Per-Provider Aggregation
+    # -----------------------------------------------------------------------
+
+    provider_names = [getattr(p, "name", None) for p in providers]
+    provider_names = [n for n in provider_names if n]
+
+    for provider_name in provider_names:
+        label_key = f"provider={provider_name}"
+
+        # Request counts
+        request_count = labeled_counters.get("request.count", {}).get(label_key, 0)
+        success_count = labeled_counters.get("request.success", {}).get(label_key, 0)
+        error_count = labeled_counters.get("request.error", {}).get(label_key, 0)
+
+        # Latency percentiles
+        latency_values = labeled_timings.get("request.latency", {}).get(label_key, [])
+        latency_stats = _compute_percentiles(latency_values)
+
+        # Error breakdown (per provider)
+        error_breakdown = {}
+        for label, count in labeled_counters.get("request.error", {}).items():
+            if label.startswith(f"{label_key},"):
+                # Parse "provider=openai,error_type=rate_limit_error"
+                parts = dict(p.split("=") for p in label.split(","))
+                error_type = parts.get("error_type", "unknown")
+                error_breakdown[error_type] = count
+
+        result["providers"][provider_name] = {
+            "request_count": request_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "error_rate": error_count / request_count if request_count > 0 else 0,
+            "success_rate": success_count / request_count if request_count > 0 else 0,
+            "latency_stats": latency_stats,
+            "error_breakdown": error_breakdown,
+        }
+
+    # -----------------------------------------------------------------------
+    # Global Aggregation
+    # -----------------------------------------------------------------------
+
+    global_request_count = counters.get("request.count", 0)
+    global_success_count = counters.get("request.success", 0)
+    global_error_count = counters.get("request.error", 0)
+
+    global_latency_values = timings.get("request.latency", [])
+    global_latency_stats = _compute_percentiles(global_latency_values)
+
+    # Error breakdown (global)
+    global_error_breakdown: dict[str, int] = {}
+    for label, count in labeled_counters.get("request.error", {}).items():
+        parts = dict(p.split("=") for p in label.split(","))
+        error_type = parts.get("error_type", "unknown")
+        global_error_breakdown[error_type] = global_error_breakdown.get(error_type, 0) + count
+
+    # Count healthy providers
+    if provider_health:
+        healthy_count = sum(1 for v in provider_health.values() if v)
+        total_providers = len(provider_health)
+    else:
+        healthy_count = len(provider_names)
+        total_providers = len(provider_names)
+
+    result["global"] = {
+        "healthy_providers": healthy_count,
+        "total_providers": total_providers,
+        "request_count": global_request_count,
+        "success_count": global_success_count,
+        "error_count": global_error_count,
+        "success_rate": (
+            global_success_count / global_request_count if global_request_count > 0 else 0
+        ),
+        "error_rate": (
+            global_error_count / global_request_count if global_request_count > 0 else 0
+        ),
+        "latency_stats": global_latency_stats,
+        "error_breakdown": global_error_breakdown,
+    }
+
+    return result
