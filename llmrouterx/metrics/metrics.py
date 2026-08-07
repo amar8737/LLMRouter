@@ -31,9 +31,7 @@ class MetricsCollector:
 
         self._counters: dict[str, int] = {}
 
-        self._timings: dict[str, deque[float]] = defaultdict(
-            lambda: deque(maxlen=max_samples)
-        )
+        self._timings: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=max_samples))
 
     # -------------------------------------------------------
     # Counters
@@ -77,13 +75,9 @@ class MetricsCollector:
     def snapshot(self) -> dict[str, Any]:
 
         with self._lock:
-
             return {
                 "counters": dict(self._counters),
-                "timings": {
-                    key: list(values)
-                    for key, values in self._timings.items()
-                },
+                "timings": {key: list(values) for key, values in self._timings.items()},
             }
 
     # Backward compatibility
@@ -135,7 +129,6 @@ class MetricsCollector:
     def reset(self) -> None:
 
         with self._lock:
-
             self._counters.clear()
 
             self._timings.clear()

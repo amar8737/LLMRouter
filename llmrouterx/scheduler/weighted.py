@@ -20,7 +20,7 @@ class WeightedScheduler(BaseScheduler):
         weighted = []
         for c in clients:
             try:
-                if await c.is_healthy():
+                if await c.is_healthy() and not getattr(c, "is_saturated", False):
                     w = getattr(c, "weight", 1) or 1
                     weighted.append((c, float(w)))
             except (AttributeError, RuntimeError, OSError, TypeError) as e:

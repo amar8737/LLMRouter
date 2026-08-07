@@ -55,7 +55,6 @@ class StubClient:
         }
 
 
-
 class StubStreamingClient:
     """A stub client that can stream chunks asynchronously or return a full response.
 

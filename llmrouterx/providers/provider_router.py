@@ -56,9 +56,7 @@ class ProviderRouter:
                     client = await self.scheduler.select(self)
 
                     if client is None:
-                        raise NoHealthyClientError(
-                            f"No healthy client for provider '{self.name}'"
-                        )
+                        raise NoHealthyClientError(f"No healthy client for provider '{self.name}'")
 
                     return await client.send(op, payload, **kwargs)
 
@@ -80,15 +78,17 @@ class ProviderRouter:
                     if attempt == max_scheduler_retries - 1:
                         raise
 
+                    # Back off briefly before re-selecting so a transient
+                    # failure does not hammer the same client.
+                    await asyncio.sleep(0.1 * (attempt + 1))
+
         for client in self.clients:
             if not await client.is_healthy():
                 continue
 
             return await client.send(op, payload, **kwargs)
 
-        raise NoHealthyClientError(
-            f"No healthy client available for provider '{self.name}'"
-        )
+        raise NoHealthyClientError(f"No healthy client available for provider '{self.name}'")
 
     async def stream(
         self,

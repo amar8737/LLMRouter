@@ -38,14 +38,8 @@ class ProviderRegistry:
         """
 
         with self._lock:
-
-            if (
-                provider.name in self._providers
-                and not overwrite
-            ):
-                raise ValueError(
-                    f"Provider '{provider.name}' already exists."
-                )
+            if provider.name in self._providers and not overwrite:
+                raise ValueError(f"Provider '{provider.name}' already exists.")
 
             self._providers[provider.name] = provider
 
@@ -58,14 +52,11 @@ class ProviderRegistry:
         """
 
         with self._lock:
-
             try:
                 return self._providers.pop(name)
 
             except KeyError as exc:
-                raise KeyError(
-                    f"Unknown provider '{name}'."
-                ) from exc
+                raise KeyError(f"Unknown provider '{name}'.") from exc
 
     # -----------------------------------------------------
     # Lookup
@@ -80,9 +71,7 @@ class ProviderRegistry:
             return self._providers[name]
 
         except KeyError as exc:
-            raise KeyError(
-                f"Unknown provider '{name}'."
-            ) from exc
+            raise KeyError(f"Unknown provider '{name}'.") from exc
 
     def exists(
         self,
@@ -110,7 +99,6 @@ class ProviderRegistry:
         healthy: list[ProviderRouter] = []
 
         for provider in providers:
-
             if await provider.is_healthy():
                 healthy.append(provider)
 
@@ -143,7 +131,4 @@ class ProviderRegistry:
 
     def __repr__(self) -> str:
 
-        return (
-            f"ProviderRegistry("
-            f"providers={list(self._providers.keys())})"
-        )
+        return f"ProviderRegistry(providers={list(self._providers.keys())})"

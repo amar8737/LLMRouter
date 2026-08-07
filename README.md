@@ -3,7 +3,7 @@
 **Intelligent routing, load balancing, and failover for LLM providers**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![PyPI](https://img.shields.io/badge/package-llmrouterx-blue.svg)](https://pypi.org/project/llmrouterx/)
 
 LLMRouter is a Python package that acts as a routing layer between your application and LLM providers (OpenAI, Groq, Together AI, etc.). It handles provider selection, API key rotation, automatic failover, retries, and metrics—so you don't have to.
@@ -694,7 +694,7 @@ We welcome contributions! Here's how to get started:
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE) for details.
+Apache 2.0 License — see [LICENSE](LICENSE) for details.
 
 ---
 

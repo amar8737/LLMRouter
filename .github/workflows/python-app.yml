@@ -19,24 +19,14 @@ jobs:
     - name: Install lint dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install flake8 black isort pylint
+        pip install ruff
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      continue-on-error: true
+    - name: Lint with ruff
       run: |
-        echo "Running flake8..."
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics || true
-    - name: Check formatting with black
-      continue-on-error: true
-      run: |
-        echo "Checking black formatting..."
-        black --check . 2>/dev/null || echo "⚠️  Some files need formatting (run: black .)"
-    - name: Check import sorting with isort
-      continue-on-error: true
-      run: |
-        echo "Checking import sorting..."
-        isort --check-only . 2>/dev/null || echo "⚠️  Some imports need sorting (run: isort .)"
+        echo "Running ruff..."
+        ruff check .
+        echo "Checking ruff formatting..."
+        ruff format --check .
 
   test:
     runs-on: ubuntu-latest
@@ -44,32 +34,25 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
-        # Install the package in editable mode so imports work
-        pip install -e .
+        pip install -e .[dev]
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-        pip install pytest pytest-asyncio 2>/dev/null || true
-    
+
     - name: Run tests
       timeout-minutes: 10
       run: |
-        if [ -d "tests" ] && [ -f "tests/run_tests.py" ]; then
-          echo "Running custom test runner..."
-          python tests/run_tests.py
-        else
-          echo "Running pytest..."
-          python -m pytest -v --tb=short
-        fi
+        python -m pytest -v --tb=short
+        python tests/run_tests.py

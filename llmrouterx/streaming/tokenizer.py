@@ -44,9 +44,7 @@ class TokenizerManager:
         tokenizer: Tokenizer,
     ) -> None:
         if name in self._tokenizers:
-            raise ValueError(
-                f"Tokenizer '{name}' already exists."
-            )
+            raise ValueError(f"Tokenizer '{name}' already exists.")
 
         self._tokenizers[name] = tokenizer
 
@@ -57,9 +55,7 @@ class TokenizerManager:
         try:
             return self._tokenizers[name]
         except KeyError as exc:
-            raise ValueError(
-                f"Unknown tokenizer '{name}'."
-            ) from exc
+            raise ValueError(f"Unknown tokenizer '{name}'.") from exc
 
     def tokenize(
         self,
@@ -67,9 +63,7 @@ class TokenizerManager:
         *,
         tokenizer: str = "whitespace",
     ) -> list[str]:
-        return list(
-            self.get(tokenizer)(text)
-        )
+        return list(self.get(tokenizer)(text))
 
 
 default_tokenizer = TokenizerManager()

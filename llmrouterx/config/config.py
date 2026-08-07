@@ -66,53 +66,33 @@ class RouterConfig:
 
     def validate(self) -> None:
         if not self.providers:
-            raise ValueError(
-                "At least one provider must be configured."
-            )
+            raise ValueError("At least one provider must be configured.")
 
         if self.timeout <= 0:
-            raise ValueError(
-                "timeout must be greater than zero."
-            )
+            raise ValueError("timeout must be greater than zero.")
 
         if self.max_retries < 0:
-            raise ValueError(
-                "max_retries must be >= 0."
-            )
+            raise ValueError("max_retries must be >= 0.")
 
         if self.max_concurrent_per_key <= 0:
-            raise ValueError(
-                "max_concurrent_per_key must be > 0."
-            )
+            raise ValueError("max_concurrent_per_key must be > 0.")
 
         if self.max_concurrent_requests is not None and self.max_concurrent_requests <= 0:
-            raise ValueError(
-                "max_concurrent_requests must be > 0 or None."
-            )
+            raise ValueError("max_concurrent_requests must be > 0 or None.")
 
         if self.circuit_breaker_threshold < 1:
-            raise ValueError(
-                "circuit_breaker_threshold must be >= 1."
-            )
+            raise ValueError("circuit_breaker_threshold must be >= 1.")
 
         if self.circuit_breaker_reset_timeout <= 0:
-            raise ValueError(
-                "circuit_breaker_reset_timeout must be > 0."
-            )
+            raise ValueError("circuit_breaker_reset_timeout must be > 0.")
 
         for provider in self.providers:
             if not isinstance(provider, dict):
-                raise ValueError(
-                    "Each provider must be a dict with at least a 'name' key."
-                )
+                raise ValueError("Each provider must be a dict with at least a 'name' key.")
             if "name" not in provider:
-                raise ValueError(
-                    "Each provider dict must have a 'name' key."
-                )
+                raise ValueError("Each provider dict must have a 'name' key.")
             if "clients" not in provider or not provider["clients"]:
-                raise ValueError(
-                    f"Provider '{provider['name']}' must have at least one client."
-                )
+                raise ValueError(f"Provider '{provider['name']}' must have at least one client.")
 
     def copy(self, **updates: Any) -> RouterConfig:
         values = {

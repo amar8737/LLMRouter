@@ -1,8 +1,83 @@
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
+from functools import wraps
 from typing import Any
+
+from ..retry.exponential import HTTPError
+
+
+def translate_sdk_error(exc: Exception) -> Exception:
+    """
+    Normalize provider-SDK exceptions into router-native types.
+
+    SDKs (OpenAI, Anthropic, ...) raise their own error hierarchy. They
+    almost always expose a ``status_code`` (and often ``headers``), which is
+    everything the router needs to classify the error. Mapping those into
+    :class:`HTTPError` makes rate limits and 5xx retryable via the shared
+    retry policy and lets ``Retry-After`` be honored.
+
+    Connection and timeout errors that are not builtin ``ConnectionError`` /
+    ``asyncio.TimeoutError`` subclasses (for example OpenAI's
+    ``APIConnectionError`` / ``APITimeoutError``) are mapped to a retryable
+    status so the retry policy treats them as transient.
+    """
+    if isinstance(exc, (HTTPError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError)):
+        return exc
+
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        headers = getattr(exc, "headers", None) or {}
+        return HTTPError(status_code, str(exc), headers=headers)
+
+    name = type(exc).__name__.lower()
+    if "connection" in name or "connect" in name:
+        return HTTPError(503, str(exc))
+
+    if "timeout" in name or "timedout" in name or "timed_out" in name:
+        return HTTPError(504, str(exc))
+
+    return exc
+
+
+def translate_async_errors(func):
+    """Translate SDK errors raised while awaiting an async adapter call."""
+
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        try:
+            return await func(self, *args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise translate_sdk_error(exc) from exc
+
+    return wrapper
+
+
+def translate_stream_errors(func):
+    """
+    Translate SDK errors raised by an async generator adapter method.
+
+    Covers both errors raised when the generator is created and errors raised
+    while iterating it. The decorated function is itself an async generator,
+    so ``async for token in adapter.stream(...)`` keeps working unchanged.
+    """
+
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs) -> AsyncGenerator[str, None]:
+        try:
+            agen = func(self, *args, **kwargs)
+            async for token in agen:
+                yield token
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise translate_sdk_error(exc) from exc
+
+    return wrapper
 
 
 class BaseProviderAdapter(ABC):

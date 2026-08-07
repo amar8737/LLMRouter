@@ -24,15 +24,15 @@ class LeastBusyScheduler(BaseScheduler):
 
     async def select(self, provider_router: ProviderRouter) -> Any:
         async with self._lock:
-
             best = None
             best_load = float("inf")
 
             for client in provider_router.clients:
-
                 try:
-
                     if not await client.is_healthy():
+                        continue
+
+                    if client.is_saturated:
                         continue
 
                     load = client.active_requests

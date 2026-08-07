@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from ..exceptions import ConfigurationError
 from .anthropic import AnthropicAdapter
@@ -23,7 +23,7 @@ class AdapterFactory:
     RouterFactory and keeps adapter selection centralized.
     """
 
-    _ADAPTERS: dict[str, type[BaseProviderAdapter]] = {
+    _ADAPTERS: ClassVar[dict[str, type[BaseProviderAdapter]]] = {
         "openai": OpenAIAdapter,
         "azure": AzureOpenAIAdapter,
         "azure_openai": AzureOpenAIAdapter,
@@ -107,8 +107,7 @@ class AdapterFactory:
         except KeyError as exc:
             supported = ", ".join(sorted(cls._ADAPTERS))
             raise ConfigurationError(
-                f"Unsupported provider '{provider}'. "
-                f"Supported providers: {supported}"
+                f"Unsupported provider '{provider}'. Supported providers: {supported}"
             ) from exc
 
         return adapter_cls(

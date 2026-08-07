@@ -32,25 +32,29 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel build twine
-          pip install -e .
+          pip install -e .[dev]
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Run tests (if tests exist)
+      - name: Run tests
         timeout-minutes: 5
-        continue-on-error: true
         run: |
-          if [ -d "tests" ] && [ -f "tests/run_tests.py" ]; then
-            echo "Running custom test runner..."
-            python tests/run_tests.py
-          else
-            echo "Running pytest..."
-            python -m pytest -v --tb=short
-          fi
+          python -m pytest -v --tb=short
+          python tests/run_tests.py
 
       - name: Build distributions
         run: |
           python -m build --sdist --wheel --outdir dist
+
+      - name: Check version not already on PyPI
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "Building llmrouterx version $version"
+          if curl -fsSL "https://pypi.org/pypi/llmrouterx/json" 2>/dev/null | python -c "import json,sys; print('$version' in json.load(sys.stdin).get('releases', {}))" | grep -q True; then
+            echo "::error::Version $version already exists on PyPI. Bump the version in pyproject.toml before publishing."
+            exit 1
+          fi
+          echo "Version $version is new — proceeding."
 
       - name: Publish to PyPI
         env:

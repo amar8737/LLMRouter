@@ -26,6 +26,10 @@ RETRYABLE_EXCEPTIONS = (
 )
 
 
+class _StreamEnd:
+    """Sentinel pushed to a stream queue when the worker finishes."""
+
+
 class LLMRouter:
     """
     Public interface for all LLM operations.
@@ -158,6 +162,26 @@ class LLMRouter:
                     type(middleware).__name__,
                 )
 
+    async def _track(self, coro) -> Any:
+        """
+        Run a request coroutine as a tracked task so graceful shutdown
+        can wait for or cancel in-flight requests.
+
+        If the awaiting caller is cancelled, the underlying request task is
+        cancelled too so work does not leak.
+        """
+        task = asyncio.create_task(coro)
+        self._track_task(task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise
+        finally:
+            self._active_tasks.discard(task)
+
     # --------------------------------------------------------
     # Core routing
     # --------------------------------------------------------
@@ -201,9 +225,7 @@ class LLMRouter:
 
         try:
             while True:
-
                 try:
-
                     response = await self._router.handle(
                         op,
                         payload,
@@ -262,6 +284,7 @@ class LLMRouter:
                         raise
 
                     delay = self.retry.get_backoff(exc, attempt)
+                    context.increment_retry()
                     logger.warning(
                         "Retrying '%s' [req_id=%s] (attempt %d, delay=%.2fs): %s",
                         op,
@@ -305,12 +328,14 @@ class LLMRouter:
         Send a chat request to the best available provider.
         """
 
-        return await self._execute(
-            "chat",
-            {
-                "prompt": prompt,
-                **kwargs,
-            },
+        return await self._track(
+            self._execute(
+                "chat",
+                {
+                    "prompt": prompt,
+                    **kwargs,
+                },
+            )
         )
 
     async def embeddings(
@@ -322,12 +347,14 @@ class LLMRouter:
         Generate embeddings using the best available provider.
         """
 
-        return await self._execute(
-            "embeddings",
-            {
-                "text": text,
-                **kwargs,
-            },
+        return await self._track(
+            self._execute(
+                "embeddings",
+                {
+                    "text": text,
+                    **kwargs,
+                },
+            )
         )
 
     async def responses(
@@ -339,12 +366,14 @@ class LLMRouter:
         Call the provider's Responses API, when supported.
         """
 
-        return await self._execute(
-            "responses",
-            {
-                "args": args,
-                **kwargs,
-            },
+        return await self._track(
+            self._execute(
+                "responses",
+                {
+                    "args": args,
+                    **kwargs,
+                },
+            )
         )
 
     async def stream(
@@ -359,56 +388,117 @@ class LLMRouter:
         token has been delivered the stream is committed to that provider,
         because switching mid-stream would duplicate output. Retries are not
         applied to streams for the same reason.
+
+        The stream runs in a tracked background task so that a router
+        ``close()`` can cancel in-flight streams, and so that a consumer
+        abandoning the generator (via ``aclose()``) promptly stops the
+        underlying provider stream.
         """
+
+        if self._closed:
+            raise RuntimeError("Router has been shut down.")
+
+        if self._request_semaphore:
+            await self._request_semaphore.acquire()
 
         context = RequestContext(
             operation="stream",
             prompt=prompt,
             model=kwargs.get("model"),
+            max_retries=getattr(self.retry, "max_retries", 0),
         )
 
-        payload, short_circuit = await self._before(
-            "stream",
-            {"prompt": prompt, **kwargs},
-            context,
-        )
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        end = _StreamEnd()
 
-        if short_circuit is not None:
-            self.metrics.incr("middleware.short_circuit.stream")
+        async def worker() -> None:
+            try:
+                payload, short_circuit = await self._before(
+                    "stream",
+                    {"prompt": prompt, **kwargs},
+                    context,
+                )
 
-            for token in short_circuit:
-                yield token
+                if short_circuit is not None:
+                    self.metrics.incr("middleware.short_circuit.stream")
 
-            context.finish()
-            return
+                    if isinstance(short_circuit, str):
+                        await queue.put(short_circuit)
+                    else:
+                        for token in short_circuit:
+                            await queue.put(token)
 
-        prompt = payload.pop("prompt", prompt)
+                    return
 
-        started = time.perf_counter()
+                payload.pop("prompt", None)
 
-        tokens = 0
+                started = time.perf_counter()
+                tokens = 0
+
+                try:
+                    async for token in self._router.stream(prompt, **payload):
+                        tokens += 1
+                        self.metrics.incr("stream.tokens")
+                        await queue.put(token)
+
+                except asyncio.CancelledError:
+                    raise
+
+                except Exception as exc:
+                    self.metrics.incr("errors.stream")
+                    await self._on_exception("stream", payload, exc, context)
+                    raise
+
+                else:
+                    self.metrics.incr("requests.stream")
+                    self.metrics.timing(
+                        "latency.stream",
+                        time.perf_counter() - started,
+                    )
+
+                finally:
+                    context.set("tokens", tokens)
+
+            finally:
+                context.finish()
+                await queue.put(end)
+
+        task = asyncio.create_task(worker())
+        self._track_task(task)
+
+        closed_early = False
 
         try:
-            async for token in self._router.stream(prompt, **payload):
-                tokens += 1
-                self.metrics.incr("stream.tokens")
-                yield token
+            while True:
+                item = await queue.get()
 
-        except asyncio.CancelledError:
-            raise
+                if isinstance(item, _StreamEnd):
+                    break
 
-        except Exception as exc:
-            self.metrics.incr("errors.stream")
-            await self._on_exception("stream", payload, exc, context)
-            raise
-
-        else:
-            self.metrics.incr("requests.stream")
-            self.metrics.timing("latency.stream", time.perf_counter() - started)
-
+                yield item
+        except GeneratorExit:
+            closed_early = True
         finally:
-            context.set("tokens", tokens)
-            context.finish()
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+            self._active_tasks.discard(task)
+
+            if self._request_semaphore:
+                self._request_semaphore.release()
+
+        if closed_early:
+            # Consumer abandoned the generator (aclose()); end it cleanly.
+            return
+
+        if task.cancelled():
+            raise asyncio.CancelledError
+
+        exc = task.exception()
+        if exc is not None:
+            raise exc
 
     async def stream_to_text(
         self,
@@ -486,7 +576,25 @@ class LLMRouter:
                 len(pending),
                 timeout,
             )
-            await cancel_tasks_and_wait(pending, timeout=timeout)
+
+            # Phase 1: give in-flight requests a chance to finish gracefully.
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=timeout,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+            for task in done:
+                exc = task.exception()
+                if exc is not None and not isinstance(exc, (asyncio.CancelledError,)):
+                    logger.warning("In-flight request finished with error: %s", exc)
+
+            # Phase 2: cancel anything still running.
+            if pending:
+                logger.warning(
+                    "Timeout reached; cancelling %d in-flight request(s).",
+                    len(pending),
+                )
+                await cancel_tasks_and_wait(pending, timeout=timeout)
 
         self._active_tasks.clear()
         logger.info("Router shut down gracefully.")

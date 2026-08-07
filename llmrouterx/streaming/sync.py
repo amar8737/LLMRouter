@@ -43,11 +43,7 @@ class SyncStreamEngine:
                     prompt,
                     model=model,
                     on_chunk=on_chunk,
-                    stop_condition=(
-                        stop_event.is_set
-                        if stop_event
-                        else None
-                    ),
+                    stop_condition=(stop_event.is_set if stop_event else None),
                     **kwargs,
                 ):
                     q.put(token)
@@ -69,7 +65,6 @@ class SyncStreamEngine:
         thread.start()
 
         while True:
-
             token = q.get()
 
             if token is None:

@@ -40,7 +40,6 @@ class CompositeRouter:
         last_exception: Exception | None = None
 
         for provider in self.providers:
-
             provider_name = getattr(
                 provider,
                 "name",
@@ -48,7 +47,6 @@ class CompositeRouter:
             )
 
             try:
-
                 response = await provider.handle(
                     op,
                     payload,
@@ -56,9 +54,7 @@ class CompositeRouter:
                 )
 
                 if self.metrics:
-                    self.metrics.incr(
-                        f"provider.success.{provider_name}"
-                    )
+                    self.metrics.incr(f"provider.success.{provider_name}")
 
                 return response
 
@@ -66,7 +62,6 @@ class CompositeRouter:
                 raise
 
             except NoHealthyClientError as exc:
-
                 logger.debug(
                     "Provider '%s' has no healthy clients.",
                     provider_name,
@@ -75,14 +70,11 @@ class CompositeRouter:
                 last_exception = exc
 
                 if self.metrics:
-                    self.metrics.incr(
-                        f"provider.no_healthy.{provider_name}"
-                    )
+                    self.metrics.incr(f"provider.no_healthy.{provider_name}")
 
                 continue
 
             except Exception as exc:
-
                 logger.exception(
                     "Provider '%s' failed.",
                     provider_name,
@@ -91,18 +83,14 @@ class CompositeRouter:
                 last_exception = exc
 
                 if self.metrics:
-                    self.metrics.incr(
-                        f"provider.error.{provider_name}"
-                    )
+                    self.metrics.incr(f"provider.error.{provider_name}")
 
                 continue
 
         if last_exception is not None:
             raise last_exception
 
-        raise NoHealthyClientError(
-            "No healthy providers available."
-        )
+        raise NoHealthyClientError("No healthy providers available.")
 
     async def health(self) -> dict[str, bool]:
         """Return a ``{provider_name: is_healthy}`` map."""

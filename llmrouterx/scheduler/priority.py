@@ -23,7 +23,7 @@ class PriorityScheduler(BaseScheduler):
         candidates = []
         for c in clients:
             try:
-                if await c.is_healthy():
+                if await c.is_healthy() and not getattr(c, "is_saturated", False):
                     pr = getattr(c, "priority", 100)
                     candidates.append((pr, c))
             except (AttributeError, RuntimeError, OSError, TypeError) as e:

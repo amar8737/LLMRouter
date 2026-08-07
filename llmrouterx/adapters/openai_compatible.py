@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from .base import BaseProviderAdapter
+from .base import (
+    BaseProviderAdapter,
+    translate_async_errors,
+    translate_stream_errors,
+)
 
 
 class OpenAICompatibleAdapter(BaseProviderAdapter):
@@ -21,6 +25,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
     - Mistral (OpenAI endpoint)
     """
 
+    @translate_async_errors
     async def chat(
         self,
         prompt: str,
@@ -43,6 +48,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
 
         return response.choices[0].message.content
 
+    @translate_stream_errors
     async def stream(
         self,
         prompt: str,
@@ -77,6 +83,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             if token:
                 yield token
 
+    @translate_async_errors
     async def embeddings(
         self,
         text: str,
@@ -93,6 +100,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
 
         return result.data[0].embedding
 
+    @translate_async_errors
     async def responses(
         self,
         *args: Any,

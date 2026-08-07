@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..adapters.base import BaseProviderAdapter
 from ..exceptions import ConfigurationError
+from ..retry.circuit_breaker import CircuitBreaker, CircuitState
 from ..retry.exponential import ExponentialRetry, HTTPError
 from ..streaming.manager import StreamingManager
 
@@ -47,6 +49,7 @@ class ClientNode:
         max_concurrent: int = 100,
         failure_threshold: int | None = None,
         cooldown_seconds: float | None = None,
+        circuit_breaker_enabled: bool = True,
         weight: float = 1.0,
         priority: int = 100,
     ) -> None:
@@ -69,6 +72,14 @@ class ClientNode:
         self.cooldown_seconds = (
             self.COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
         )
+
+        # Per-key circuit breaker. Health is evaluated per client so that one
+        # broken provider/key does not take down the whole router.
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=self.failure_threshold,
+            reset_timeout=self.cooldown_seconds,
+        )
+        self.circuit_breaker_enabled = circuit_breaker_enabled
 
         # Consumed by WeightedScheduler / PriorityScheduler.
         self.weight = weight
@@ -96,6 +107,10 @@ class ClientNode:
             if self.cooldown_until is not None and now >= self.cooldown_until:
                 self.cooldown_until = None
                 self.failures = 0
+                self.circuit_breaker.reset()
+
+            if self.circuit_breaker_enabled and self.circuit_breaker.state == CircuitState.OPEN:
+                return False
 
             return self.cooldown_until is None
 
@@ -117,6 +132,13 @@ class ClientNode:
         async with self._lock:
             now = _utcnow()
 
+            if self.circuit_breaker_enabled and self.circuit_breaker.state == CircuitState.OPEN:
+                if now < self.cooldown_until:
+                    return False
+                self.cooldown_until = None
+                self.failures = 0
+                self.circuit_breaker.reset()
+
             if self.cooldown_until is not None:
                 if now < self.cooldown_until:
                     return False
@@ -128,7 +150,10 @@ class ClientNode:
                 return True
 
             try:
-                result = await self.client.health_check()
+                result = await asyncio.wait_for(
+                    self.client.health_check(),
+                    timeout=self.timeout,
+                )
                 if result:
                     self.failures = 0
                 return result
@@ -151,6 +176,7 @@ class ClientNode:
         async with self._lock:
             self.failures = 0
             self.cooldown_until = None
+            self.circuit_breaker.reset()
 
     # ------------------------------------------------------------------
     # Reservation API
@@ -194,7 +220,7 @@ class ClientNode:
         await self.acquire()
 
         try:
-            return await coroutine
+            result = await coroutine
         except asyncio.CancelledError:
             raise
         except HTTPError as exc:
@@ -205,35 +231,46 @@ class ClientNode:
                     self.api_key[-4:] if self.api_key else "????",
                 )
                 raise
-            async with self._lock:
-                self.failures += 1
-                self.last_failure = _utcnow()
-                if self.failures >= self.failure_threshold:
-                    self.cooldown_until = _utcnow() + timedelta(
-                        seconds=self.cooldown_seconds
-                    )
-                    logger.warning(
-                        "Key ...%s put in cooldown after %d failures.",
-                        self.api_key[-4:] if self.api_key else "????",
-                        self.failures,
-                    )
+            await self._record_failure()
             raise
         except Exception:
-            async with self._lock:
-                self.failures += 1
-                self.last_failure = _utcnow()
-                if self.failures >= self.failure_threshold:
-                    self.cooldown_until = _utcnow() + timedelta(
-                        seconds=self.cooldown_seconds
-                    )
-                    logger.warning(
-                        "Key ...%s put in cooldown after %d failures.",
-                        self.api_key[-4:] if self.api_key else "????",
-                        self.failures,
-                    )
+            await self._record_failure()
             raise
+        else:
+            await self._record_success()
+            return result
         finally:
             await self.release()
+
+    async def _record_failure(self) -> None:
+        """
+        Record a failure against this key and open its circuit breaker once
+        the threshold is crossed.
+        """
+        async with self._lock:
+            self.failures += 1
+            self.last_failure = _utcnow()
+            if self.circuit_breaker_enabled:
+                self.circuit_breaker.record_failure()
+
+            if self.failures >= self.failure_threshold:
+                self.cooldown_until = _utcnow() + timedelta(seconds=self.cooldown_seconds)
+                logger.warning(
+                    "Key ...%s put in cooldown after %d failures.",
+                    self.api_key[-4:] if self.api_key else "????",
+                    self.failures,
+                )
+
+    async def _record_success(self) -> None:
+        """
+        Record a success, resetting failure state and closing the breaker.
+        """
+        async with self._lock:
+            self.last_success = _utcnow()
+            if self.circuit_breaker_enabled:
+                self.circuit_breaker.record_success()
+            self.failures = 0
+            self.cooldown_until = None
 
     # ------------------------------------------------------------------
     # Request
@@ -326,26 +363,36 @@ class ClientNode:
         if stream_timeout is None:
             stream_timeout = self.timeout
 
-        source = (
-            self.streaming.stream(prompt, **kwargs)
-            if self.streaming is not None
-            else self.client.stream(prompt, **kwargs)
-        )
+        await self.acquire()
 
-        if stream_timeout is not None:
-            gen = source.__aiter__()
-            while True:
-                try:
-                    token = await asyncio.wait_for(
-                        gen.__anext__(),
-                        timeout=stream_timeout,
-                    )
+        source = None
+
+        try:
+            source = (
+                self.streaming.stream(prompt, **kwargs)
+                if self.streaming is not None
+                else self.client.stream(prompt, **kwargs)
+            )
+
+            if stream_timeout is not None:
+                gen = source.__aiter__()
+                while True:
+                    try:
+                        token = await asyncio.wait_for(
+                            gen.__anext__(),
+                            timeout=stream_timeout,
+                        )
+                        yield token
+                    except StopAsyncIteration:
+                        return
+            else:
+                async for token in source:
                     yield token
-                except StopAsyncIteration:
-                    return
-        else:
-            async for token in source:
-                yield token
+        finally:
+            if source is not None:
+                with suppress(Exception):
+                    await source.aclose()
+            await self.release()
 
     def __repr__(self) -> str:
         return (

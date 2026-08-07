@@ -42,7 +42,6 @@ class AsyncStreamEngine:
             model=model,
             **kwargs,
         ):
-
             if stop_condition and stop_condition():
                 break
 

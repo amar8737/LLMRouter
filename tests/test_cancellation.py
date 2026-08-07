@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 
 from llmrouterx.client.client_node import ClientNode
 from llmrouterx.providers.composite_router import CompositeRouter
@@ -45,10 +46,8 @@ def test_cancellation_propagates_to_client():
         # let it start and enter client.send
         await asyncio.sleep(0.05)
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         # ensure that active_requests is decremented and failures not incremented
         assert node.active_requests == 0

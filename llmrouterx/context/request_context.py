@@ -26,9 +26,7 @@ class RequestContext:
     # Identity
     # ----------------------------------------------------
 
-    request_id: str = field(
-        default_factory=lambda: str(uuid.uuid4())
-    )
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     trace_id: str | None = None
 
@@ -62,9 +60,7 @@ class RequestContext:
     # Timing
     # ----------------------------------------------------
 
-    started_at: float = field(
-        default_factory=time.perf_counter
-    )
+    started_at: float = field(default_factory=time.perf_counter)
 
     finished_at: float | None = None
 
@@ -72,9 +68,7 @@ class RequestContext:
     # Metadata
     # ----------------------------------------------------
 
-    metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # ----------------------------------------------------
     # Helpers

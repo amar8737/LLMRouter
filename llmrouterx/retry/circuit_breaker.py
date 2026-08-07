@@ -87,16 +87,12 @@ class CircuitBreaker:
             if self._state == CircuitState.HALF_OPEN:
                 self._state = CircuitState.OPEN
                 logger.warning(
-                    "Circuit breaker re-opened after HALF_OPEN failure "
-                    "(total failures: %d)",
+                    "Circuit breaker re-opened after HALF_OPEN failure (total failures: %d)",
                     self._failure_count,
                 )
                 return
 
-            if (
-                self._failure_count >= self._failure_threshold
-                and self._state != CircuitState.OPEN
-            ):
+            if self._failure_count >= self._failure_threshold and self._state != CircuitState.OPEN:
                 self._state = CircuitState.OPEN
                 logger.warning(
                     "Circuit breaker opened after %d consecutive failures.",
@@ -110,7 +106,4 @@ class CircuitBreaker:
             self._half_open_calls = 0
 
     def __repr__(self) -> str:
-        return (
-            f"CircuitBreaker(state={self.state.value}, "
-            f"failures={self._failure_count})"
-        )
+        return f"CircuitBreaker(state={self.state.value}, failures={self._failure_count})"

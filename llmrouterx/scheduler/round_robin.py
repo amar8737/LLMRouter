@@ -32,7 +32,7 @@ class RoundRobinScheduler(BaseScheduler):
                 except (AttributeError, RuntimeError, OSError, TypeError) as e:
                     logging.debug("round-robin: client health check failed: %s", e)
                     healthy = False
-                if healthy:
+                if healthy and not getattr(c, "is_saturated", False):
                     self._indices[key] = (idx + i + 1) % len(clients)
                     return c
         return None

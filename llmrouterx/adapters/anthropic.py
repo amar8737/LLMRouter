@@ -4,7 +4,11 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from ..exceptions import ConfigurationError
-from .base import BaseProviderAdapter
+from .base import (
+    BaseProviderAdapter,
+    translate_async_errors,
+    translate_stream_errors,
+)
 
 
 class AnthropicAdapter(BaseProviderAdapter):
@@ -37,6 +41,7 @@ class AnthropicAdapter(BaseProviderAdapter):
 
         return resolved
 
+    @translate_async_errors
     async def chat(
         self,
         prompt: str,
@@ -63,10 +68,10 @@ class AnthropicAdapter(BaseProviderAdapter):
         return "".join(
             block.text
             for block in blocks
-            if getattr(block, "type", None) == "text"
-            and getattr(block, "text", None)
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
         )
 
+    @translate_stream_errors
     async def stream(
         self,
         prompt: str,

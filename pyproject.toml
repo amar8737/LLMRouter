@@ -1,22 +1,20 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmrouterx"
 version = "0.1.9"
-description = "Minimal llmrouterx MVP"
+description = "Intelligent routing, load balancing, and failover for LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [ { name = "Amar Jeet Kushwaha", email = "babuamar455@gmail.com" } ]
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 keywords = ["llm", "router", "openai", "providers"]
 classifiers = [
 	"Development Status :: 4 - Beta",
 	"Programming Language :: Python :: 3",
 	"Programming Language :: Python :: 3 :: Only",
-	"Programming Language :: Python :: 3.8",
-	"Programming Language :: Python :: 3.9",
 	"Programming Language :: Python :: 3.10",
 	"Programming Language :: Python :: 3.11",
 	"Programming Language :: Python :: 3.12",
@@ -33,7 +31,10 @@ Tracker = "https://github.com/amar8737/LLMRouter/issues"
 dev = [
 	"pytest",
 	"pytest-asyncio",
+	"ruff",
 ]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.25"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
