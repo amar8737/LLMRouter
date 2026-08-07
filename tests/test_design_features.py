@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-from fastapi.testclient import TestClient
 
 from llmrouterx.adapters.base import BaseProviderAdapter
 from llmrouterx.client import ClientNode
@@ -11,7 +10,16 @@ from llmrouterx.providers.composite_router import CompositeRouter
 from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.retry.exponential import HTTPError
 from llmrouterx.router.llmrouter import LLMRouter
-from llmrouterx.server.app import create_app
+
+try:
+    from fastapi.testclient import TestClient
+
+    from llmrouterx.server.app import create_app
+except ImportError:
+    pytest.skip(
+        "fastapi / server extras not installed; run: pip install 'llmrouterx[server]'",
+        allow_module_level=True,
+    )
 
 
 class FailingClient:

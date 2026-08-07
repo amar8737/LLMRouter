@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from llmrouterx.cli import main as cli_main
 from llmrouterx.client.client_node import ClientNode
@@ -12,7 +11,16 @@ from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.providers.stub_provider import StubClient
 from llmrouterx.retry.exponential import HTTPError
 from llmrouterx.router.llmrouter import LLMRouter
-from llmrouterx.server.app import create_app
+
+try:
+    from fastapi.testclient import TestClient
+
+    from llmrouterx.server.app import create_app
+except ImportError:
+    pytest.skip(
+        "fastapi / server extras not installed; run: pip install 'llmrouterx[server]'",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture

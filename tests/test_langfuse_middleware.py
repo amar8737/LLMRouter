@@ -1,7 +1,14 @@
 import pytest
 
 from llmrouterx.context import RequestContext
-from llmrouterx.middleware.langfuse_trace import LangfuseMiddleware, is_configured
+
+try:
+    from llmrouterx.middleware.langfuse_trace import LangfuseMiddleware, is_configured
+except ImportError:
+    pytest.skip(
+        "langfuse not installed; run: pip install 'llmrouterx[langfuse]'",
+        allow_module_level=True,
+    )
 
 
 class FakeObservation:

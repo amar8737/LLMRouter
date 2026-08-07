@@ -91,6 +91,10 @@ module = [
     "uvicorn",
 ]
 ignore_missing_imports = true
+# Optional extras can be absent (CI lint) or present alongside incompatible
+# transitive stubs (e.g. an older numpy). Treat them as Any instead of
+# following their bodies, so ``mypy llmrouterx`` is stable across environments.
+follow_imports = "skip"
 
 [tool.ruff]
 line-length = 100
