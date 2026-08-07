@@ -73,6 +73,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable interactive OpenAPI docs (also LLMROUTER_DOCS=0)",
     )
+    serve.add_argument(
+        "--health-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Timeout in seconds for /health endpoint provider checks (default: per-client timeout)"
+        ),
+    )
 
     return parser
 
@@ -118,6 +126,7 @@ def _run_serve(args: argparse.Namespace) -> None:
             admin_token=args.admin_token,
             api_keys=args.api_key,
             docs_enabled=not args.no_docs,
+            health_timeout=args.health_timeout,
         )
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
         return

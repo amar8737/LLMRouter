@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -225,6 +226,7 @@ def create_app(
     admin_token: str | None = None,
     api_keys: Sequence[str] | None = None,
     docs_enabled: bool = True,
+    health_timeout: float | None = None,
 ) -> FastAPI:
     """Application factory for the standalone HTTP Gateway.
 
@@ -269,6 +271,7 @@ def create_app(
             cfg = cfg or RouterConfig.from_env()
             app.state.llm_router = RouterFactory.build(cfg)
             app.state.owns_router = True
+        app.state.health_timeout = health_timeout
 
         logger.info("LLMRouter Gateway API initialized.")
         yield
@@ -340,7 +343,16 @@ def create_app(
     @app.get("/health", response_model=HealthResponse)
     async def health_check(request: Request) -> HealthResponse:
         rt: LLMRouter = request.app.state.llm_router
-        provider_health = await rt.health()
+        health_timeout = request.app.state.health_timeout
+
+        if health_timeout is not None:
+            try:
+                provider_health = await asyncio.wait_for(rt.health(), timeout=health_timeout)
+            except asyncio.TimeoutError:
+                provider_health = {}
+        else:
+            provider_health = await rt.health()
+
         total = len(provider_health)
         healthy = sum(1 for value in provider_health.values() if value)
         return HealthResponse(
