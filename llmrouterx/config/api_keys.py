@@ -15,6 +15,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -78,6 +79,7 @@ class APIKeyDatabase:
                 isolation_level=None,  # Autocommit
             )
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.row_factory = sqlite3.Row
         return self._conn
@@ -117,14 +119,21 @@ class APIKeyDatabase:
 
     @contextmanager
     def _transaction(self):
-        """Context manager for database transactions."""
+        """Context manager for database transactions with retry on lock."""
         conn = self._get_connection()
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                yield conn
+                conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and attempt < max_retries - 1:
+                    conn.rollback()
+                    time.sleep(0.1 * (attempt + 1))  # exponential backoff
+                    continue
+                conn.rollback()
+                raise
 
     @staticmethod
     def _hash_key(key: str) -> str:
