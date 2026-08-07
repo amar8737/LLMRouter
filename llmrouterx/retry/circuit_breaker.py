@@ -156,7 +156,9 @@ class CircuitBreaker:
                         self._half_open_successes,
                     )
                 else:
-                    self._failure_count = int(max(0, self._failure_count - self._success_decay_factor))
+                    self._failure_count = int(
+                        max(0, self._failure_count - self._success_decay_factor)
+                    )
                     if self._failure_count <= 0:
                         self._failure_count = 0
                         self._state = CircuitState.CLOSED
