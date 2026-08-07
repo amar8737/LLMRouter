@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..exceptions import NoHealthyClientError
+
+if TYPE_CHECKING:
+    from ..context.request_context import RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,8 @@ class CompositeRouter:
         self,
         op: str,
         payload: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
 
@@ -61,10 +66,13 @@ class CompositeRouter:
                 response = await provider.handle(
                     op,
                     payload,
+                    context=context,
                     **kwargs,
                 )
 
                 self.last_provider = provider_name
+                if context is not None:
+                    context.provider = provider_name
 
                 if self.metrics:
                     self.metrics.incr(f"provider.success.{provider_name}")
@@ -131,19 +139,26 @@ class CompositeRouter:
         """
         Stream from the first healthy provider.
 
-        Failover only happens before the first token is emitted.
+        Failover only happens *before* the first token is emitted. Once a
+        token has been delivered the stream is committed to that provider;
+        a mid-stream failure is surfaced to the caller instead of silently
+        re-routing, which would interleave output from two providers.
         """
         for provider in self.providers:
             name = getattr(provider, "name", provider.__class__.__name__)
+            started = False
             try:
                 async for token in provider.stream(prompt, **kwargs):
+                    started = True
                     yield token
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if started:
+                    raise
                 logger.warning(
-                    "Provider '%s' stream failed: %s",
+                    "Provider '%s' stream failed before first token: %s",
                     name,
                     str(exc),
                 )

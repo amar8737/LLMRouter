@@ -114,36 +114,28 @@ class ExponentialRetry:
     ) -> float:
         """
         Compute delay before next retry.
+
+        ``Retry-After`` (when present) wins and is only capped at
+        ``max_backoff``. Otherwise the exponential delay is computed, jitter
+        is applied, and only then is the result clamped to
+        ``[rate_limit_min_backoff, max_backoff]`` so jitter can never push the
+        delay outside the configured bounds.
         """
-
-        if isinstance(exc, HTTPError) and exc.status_code == 429:
-            retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
-            if retry_after is not None:
-                return min(retry_after, self.max_backoff)
-
-            delay = self.base * (self.factor ** (attempt - 1))
-            delay = max(delay, self.rate_limit_min_backoff)
-            delay = min(delay, self.max_backoff)
-
-            if self.jitter:
-                delay *= random.uniform(0.5, 1.5)
-
-            return delay
 
         if isinstance(exc, HTTPError):
             retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
             if retry_after is not None:
                 return min(retry_after, self.max_backoff)
 
-        delay = min(
-            self.base * (self.factor ** (attempt - 1)),
-            self.max_backoff,
-        )
+        delay = self.base * (self.factor ** (attempt - 1))
 
         if self.jitter:
             delay *= random.uniform(0.5, 1.5)
 
-        return delay
+        if isinstance(exc, HTTPError) and exc.status_code == 429:
+            delay = max(delay, self.rate_limit_min_backoff)
+
+        return min(delay, self.max_backoff)
 
     async def wait(
         self,

@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..exceptions import NoHealthyClientError
+
+if TYPE_CHECKING:
+    from ..context.request_context import RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +46,27 @@ class ProviderRouter:
         self,
         op: str,
         payload: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
-        Route with retry logic for TOCTOU races.
+        Route a request to a healthy client, with per-client error isolation.
 
-        The scheduler retry loop only guards against a client dying between
-        selection and dispatch. It fails fast (no backoff here) so the
-        router-level retry policy owns backoff and retry decisions.
+        When a scheduler is configured it is consulted up to three times as a
+        TOCTOU guard (a client can die between selection and dispatch). If the
+        scheduler path is exhausted, we fall through to a linear scan of any
+        remaining healthy clients so a bad scheduler pick cannot starve a
+        provider that still has working clients.
+
+        A single client's failure never aborts the whole provider: the next
+        healthy client is tried. If every client fails, the last original
+        exception is re-raised (not a ``NoHealthyClientError``) so the
+        router-level retry policy can still classify and retry it.
         """
+        last_exception: Exception | None = None
+        attempted: set[Any] = set()
+
         if self.scheduler is not None:
             max_scheduler_retries = 3
 
@@ -63,9 +78,8 @@ class ProviderRouter:
                     if client is None:
                         raise NoHealthyClientError(f"No healthy client for provider '{self.name}'")
 
-                    result = await client.send(op, payload, **kwargs)
-                    self.last_api_key = getattr(client, "api_key", None)
-                    return result
+                    attempted.add(client)
+                    return await self._dispatch(client, op, payload, context, kwargs)
 
                 except asyncio.CancelledError:
                     raise
@@ -74,6 +88,7 @@ class ProviderRouter:
                     raise
 
                 except Exception as exc:
+                    last_exception = exc
                     logger.warning(
                         "Client '%s' failed (attempt %d/%d): %s",
                         getattr(client, "api_key", "<unknown>"),
@@ -82,31 +97,68 @@ class ProviderRouter:
                         str(exc),
                     )
 
-                    if attempt == max_scheduler_retries - 1:
-                        raise
-
         for client in self.clients:
-            if not await client.is_healthy():
+            if client in attempted:
                 continue
 
-            result = await client.send(op, payload, **kwargs)
-            self.last_api_key = getattr(client, "api_key", None)
-            return result
+            try:
+                if not await client.is_healthy():
+                    continue
+                return await self._dispatch(client, op, payload, context, kwargs)
+
+            except asyncio.CancelledError:
+                raise
+
+            except NoHealthyClientError:
+                raise
+
+            except Exception as exc:
+                last_exception = exc
+                logger.warning(
+                    "Client '%s' failed: %s",
+                    getattr(client, "api_key", "<unknown>"),
+                    str(exc),
+                )
+
+        if last_exception is not None:
+            raise last_exception
 
         raise NoHealthyClientError(f"No healthy client available for provider '{self.name}'")
+
+    async def _dispatch(
+        self,
+        client: Any,
+        op: str,
+        payload: dict[str, Any],
+        context: RequestContext | None,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Send to a client and record attribution for the request context."""
+        result = await client.send(op, payload, **kwargs)
+        self.last_api_key = getattr(client, "api_key", None)
+        if context is not None:
+            context.api_key = self.last_api_key
+        return result
 
     async def stream(
         self,
         prompt: str,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
-        """Stream from the first healthy client."""
+        """Stream from the first healthy client.
+
+        Failover only happens *before* the first token is emitted. Once a
+        token has been delivered the stream is committed to that client;
+        a mid-stream failure is surfaced to the caller instead of re-routing.
+        """
         for client in self.clients:
             try:
                 if not await client.is_healthy():
                     continue
 
+                started = False
                 async for token in client.stream(prompt, **kwargs):
+                    started = True
                     yield token
                 return
 
@@ -114,8 +166,10 @@ class ProviderRouter:
                 raise
 
             except Exception:
+                if started:
+                    raise
                 logger.exception(
-                    "Stream failed for client %s",
+                    "Stream failed before first token for client %s",
                     getattr(client, "api_key", "<unknown>"),
                 )
                 continue

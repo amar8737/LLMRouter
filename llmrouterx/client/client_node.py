@@ -96,38 +96,51 @@ class ClientNode:
 
         self.active_requests = 0
 
-        self.failures = 0
         self.last_success: datetime | None = None
         self.last_failure: datetime | None = None
-        self.cooldown_until: datetime | None = None
 
     # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------
 
+    @property
+    def failures(self) -> int:
+        """
+        Number of consecutive failures recorded on the circuit breaker.
+
+        The per-key circuit breaker is the single source of truth for client
+        health; this is a read-only view over it.
+        """
+        return self.circuit_breaker.failure_count
+
+    @property
+    def cooldown_until(self) -> datetime | None:
+        """
+        Wall-clock estimate of when the circuit breaker will recover, or None
+        when it is not currently cooling down.
+        """
+        remaining = self.circuit_breaker.cooldown_remaining()
+        if remaining is None:
+            return None
+        return _utcnow() + timedelta(seconds=remaining)
+
     async def is_healthy(self) -> bool:
         async with self._lock:
-            now = _utcnow()
+            if not self.circuit_breaker_enabled:
+                return True
 
-            # Recover automatically after cooldown
-            if self.cooldown_until is not None and now >= self.cooldown_until:
-                self.cooldown_until = None
-                self.failures = 0
-                self.circuit_breaker.reset()
+            # Cooldown expired -> full recovery.
+            self.circuit_breaker.reset_if_expired()
 
-            if self.circuit_breaker_enabled and self.circuit_breaker.state == CircuitState.OPEN:
-                return False
-
-            return self.cooldown_until is None
+            return self.circuit_breaker.state != CircuitState.OPEN
 
     async def check_health(self, force: bool = False) -> bool:
         """
         Proactive health check with automatic recovery.
 
-        Only performs actual health check if:
+        Only performs an actual provider ping if:
         1. force is True, or
-        2. Client is in cooldown (to check for recovery), or
-        3. Client has no active requests
+        2. Client has no active requests (and is not in cooldown)
 
         Args:
             force: If True, always perform health check regardless of state.
@@ -136,37 +149,35 @@ class ClientNode:
             bool: True if client is healthy, False otherwise.
         """
         async with self._lock:
-            now = _utcnow()
+            if not self.circuit_breaker_enabled:
+                should_probe = force
+            else:
+                self.circuit_breaker.reset_if_expired()
 
-            if self.circuit_breaker_enabled and self.circuit_breaker.state == CircuitState.OPEN:
-                if self.cooldown_until is not None and now < self.cooldown_until:
+                if self.circuit_breaker.state == CircuitState.OPEN:
                     return False
-                self.cooldown_until = None
-                self.failures = 0
-                self.circuit_breaker.reset()
 
-            if self.cooldown_until is not None:
-                if now < self.cooldown_until:
-                    return False
-                self.cooldown_until = None
-                self.failures = 0
-                return True
+                should_probe = force or self.active_requests == 0
 
-            if not force and self.active_requests > 0:
-                return True
+        if not should_probe:
+            return True
 
-            try:
-                result = await asyncio.wait_for(
-                    self.client.health_check(),
-                    timeout=self.timeout,
-                )
-                if result:
-                    self.failures = 0
-                return result
-            except Exception:
-                key_suffix = self.api_key[-4:] if self.api_key else "????"
-                logger.exception("Health check failed for key ...%s", key_suffix)
-                return False
+        try:
+            result = await asyncio.wait_for(
+                self.client.health_check(),
+                timeout=self.timeout,
+            )
+        except Exception:
+            key_suffix = self.api_key[-4:] if self.api_key else "????"
+            logger.exception("Health check failed for key ...%s", key_suffix)
+            return False
+
+        if result:
+            async with self._lock:
+                if self.circuit_breaker_enabled:
+                    self.circuit_breaker.record_success()
+
+        return result
 
     @property
     def is_saturated(self) -> bool:
@@ -180,8 +191,6 @@ class ClientNode:
         Clear failure state and end any active cooldown.
         """
         async with self._lock:
-            self.failures = 0
-            self.cooldown_until = None
             self.circuit_breaker.reset()
 
     # ------------------------------------------------------------------
@@ -220,8 +229,13 @@ class ClientNode:
         Ensures that acquire/release pair is atomic - if an exception
         occurs, the slot is returned to the pool.
 
-        Transient HTTP errors (429, 5xx) do not count against client health
-        because they are server-side issues, not client faults.
+        Health is only penalized for availability failures:
+        - Transient HTTP errors (429, 5xx) do not count by default because
+          they are server-side load issues, not client faults.
+        - Permanent 4xx request errors (auth, bad payload, not found) never
+          count because they are configuration/request faults, not an
+          indication the key is unavailable.
+        - Non-retryable server errors (e.g. 501) still count as failures.
         """
         await self.acquire()
 
@@ -238,6 +252,13 @@ class ClientNode:
                 )
                 if self.count_transient_failures:
                     await self._record_failure()
+                raise
+            if 400 <= exc.status_code < 500:
+                logger.debug(
+                    "Permanent HTTP %d for key ...%s — request error, not penalizing health.",
+                    exc.status_code,
+                    self.api_key[-4:] if self.api_key else "????",
+                )
                 raise
             await self._record_failure()
             raise
@@ -256,18 +277,9 @@ class ClientNode:
         the threshold is crossed.
         """
         async with self._lock:
-            self.failures += 1
             self.last_failure = _utcnow()
             if self.circuit_breaker_enabled:
                 self.circuit_breaker.record_failure()
-
-            if self.failures >= self.failure_threshold:
-                self.cooldown_until = _utcnow() + timedelta(seconds=self.cooldown_seconds)
-                logger.warning(
-                    "Key ...%s put in cooldown after %d failures.",
-                    self.api_key[-4:] if self.api_key else "????",
-                    self.failures,
-                )
 
     async def _record_success(self) -> None:
         """
@@ -277,8 +289,6 @@ class ClientNode:
             self.last_success = _utcnow()
             if self.circuit_breaker_enabled:
                 self.circuit_breaker.record_success()
-            self.failures = 0
-            self.cooldown_until = None
 
     # ------------------------------------------------------------------
     # Request

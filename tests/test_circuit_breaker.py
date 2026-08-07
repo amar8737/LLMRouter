@@ -51,6 +51,7 @@ def test_transitions_to_half_open_after_timeout(breaker, monkeypatch):
     current = time.monotonic()
     monkeypatch.setattr("llmrouterx.retry.circuit_breaker.time.monotonic", lambda: current + 10.5)
 
+    breaker.maybe_advance()
     assert breaker.state == CircuitState.HALF_OPEN
 
 

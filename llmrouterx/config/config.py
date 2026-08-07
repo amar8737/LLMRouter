@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
+
+from .secrets import resolve_key
 
 
 @dataclass(slots=True)
@@ -66,6 +69,83 @@ class RouterConfig:
             circuit_breaker_threshold=int(os.getenv("LLMROUTER_CB_THRESHOLD", "5")),
             circuit_breaker_reset_timeout=float(os.getenv("LLMROUTER_CB_RESET_TIMEOUT", "30")),
         )
+
+    def resolve_keys(self) -> RouterConfig:
+        """Return a copy with every client's API key materialised.
+
+        Each client dict's ``api_key``/``api_key_env``/``api_key_file`` source
+        is replaced with the resolved literal key under ``api_key``.
+        """
+        clean: list[Any] = []
+        for provider in self.providers:
+            resolved_provider = dict(provider)
+            resolved_provider["clients"] = [
+                {**client, "api_key": resolve_key(client)}
+                for client in provider.get("clients", [])
+            ]
+            clean.append(resolved_provider)
+        return self.copy(providers=clean)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable dict of the numeric/string settings."""
+        return {
+            "providers": self.providers,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+            "max_concurrent_per_key": self.max_concurrent_per_key,
+            "max_concurrent_requests": self.max_concurrent_requests,
+            "total_timeout": self.total_timeout,
+            "enable_circuit_breaker": self.enable_circuit_breaker,
+            "circuit_breaker_threshold": self.circuit_breaker_threshold,
+            "circuit_breaker_reset_timeout": self.circuit_breaker_reset_timeout,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RouterConfig:
+        """Build a config from a dict, falling back to defaults for missing keys."""
+        known = {
+            "providers",
+            "timeout",
+            "max_retries",
+            "max_concurrent_per_key",
+            "max_concurrent_requests",
+            "total_timeout",
+            "enable_circuit_breaker",
+            "circuit_breaker_threshold",
+            "circuit_breaker_reset_timeout",
+        }
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"Unknown config keys: {sorted(unknown)}")
+        cfg = cls(
+            providers=list(data.get("providers", [])),
+            timeout=float(data.get("timeout", 60.0)),
+            max_retries=int(data.get("max_retries", 3)),
+            max_concurrent_per_key=int(data.get("max_concurrent_per_key", 100)),
+            max_concurrent_requests=(
+                int(data["max_concurrent_requests"])
+                if data.get("max_concurrent_requests")
+                else None
+            ),
+            total_timeout=(
+                float(data["total_timeout"]) if data.get("total_timeout") else None
+            ),
+            enable_circuit_breaker=bool(data.get("enable_circuit_breaker", True)),
+            circuit_breaker_threshold=int(data.get("circuit_breaker_threshold", 5)),
+            circuit_breaker_reset_timeout=float(
+                data.get("circuit_breaker_reset_timeout", 30.0)
+            ),
+        )
+        return cfg.resolve_keys()
+
+    @classmethod
+    def from_file(cls, path: str | os.PathLike[str]) -> RouterConfig:
+        """Load a config from a JSON file."""
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            raise ValueError("Config file must contain a JSON object.")
+        return cls.from_dict(data)
 
     def validate(self) -> None:
         if not self.providers:

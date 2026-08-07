@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+import time
 
 import pytest
 
@@ -9,6 +9,7 @@ from llmrouterx.metrics.metrics import MetricsCollector
 from llmrouterx.providers.composite_router import CompositeRouter
 from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.providers.stub_provider import StubClient
+from llmrouterx.scheduler.base import BaseScheduler
 from llmrouterx.scheduler.round_robin import RoundRobinScheduler
 
 
@@ -18,10 +19,9 @@ def healthy_node(key, name="stub"):
 
 
 def unhealthy_node(key, name="stub"):
-    """Build a ClientNode that is in cooldown (unhealthy)."""
+    """Build a ClientNode whose circuit breaker is open (unhealthy)."""
     node = ClientNode(key, StubClient(name), failure_threshold=1, cooldown_seconds=60)
-    node.failures = 1
-    node.cooldown_until = _utcnow() + timedelta(seconds=60)
+    node.circuit_breaker.record_failure()
     return node
 
 
@@ -113,6 +113,36 @@ async def collect_stream(agen):
     return [token async for token in agen]
 
 
+@pytest.mark.asyncio
+async def test_composite_stream_does_not_fail_over_after_first_token(metrics):
+    class HalfStream:
+        name = "half"
+
+        async def stream(self, prompt, **kwargs):
+            yield {"provider": "half", "response": "part1"}
+            raise RuntimeError("mid-stream boom")
+            yield  # pragma: no cover
+
+    class GoodStream:
+        name = "good"
+
+        async def stream(self, prompt, **kwargs):
+            yield {"provider": "good", "response": "should-not-appear"}
+
+    p_half = ProviderRouter("half", [ClientNode("k1", HalfStream())])
+    p_good = ProviderRouter("good", [ClientNode("k2", GoodStream())])
+    composite = CompositeRouter([p_half, p_good], metrics=metrics)
+
+    collected = []
+    with pytest.raises(RuntimeError, match="mid-stream boom"):
+        async for token in composite.stream("hi"):
+            collected.append(token)
+
+    # Only the committed provider's tokens were delivered; no silent
+    # re-routing to the next provider mid-stream.
+    assert [t["response"] for t in collected] == ["part1"]
+
+
 def test_composite_stream_raises_when_all_fail(metrics):
     class Broken:
         name = "broken"
@@ -146,6 +176,68 @@ def test_provider_router_is_healthy_false_when_none():
         ],
     )
     assert asyncio.run(p.is_healthy()) is False
+
+
+def test_provider_router_linear_fallback_to_next_healthy_client():
+    class Failing:
+        async def is_healthy(self):
+            return True
+
+        async def send(self, op, payload, **kwargs):
+            raise RuntimeError("boom")
+
+    class Working:
+        async def is_healthy(self):
+            return True
+
+        async def send(self, op, payload, **kwargs):
+            return {"provider": "working", "ok": True}
+
+    p = ProviderRouter("p", [Failing(), Working()])
+    result = asyncio.run(p.handle("chat", {"prompt": "hi"}))
+    assert result["provider"] == "working"
+
+
+def test_provider_router_scheduler_exhaustion_falls_back_to_linear_scan():
+    calls = {"n": 0}
+
+    class Flaky:
+        async def is_healthy(self):
+            return True
+
+        async def send(self, op, payload, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("transient")
+
+    class Backup:
+        async def is_healthy(self):
+            return True
+
+        async def send(self, op, payload, **kwargs):
+            return {"provider": "backup"}
+
+    class AlwaysFirst(BaseScheduler):
+        async def select(self, provider_router):
+            return provider_router.clients[0]
+
+    p = ProviderRouter("p", [Flaky(), Backup()], scheduler=AlwaysFirst())
+    result = asyncio.run(p.handle("chat", {"prompt": "hi"}))
+    assert result["provider"] == "backup"
+    # Scheduler tried the flaky client 3 times, then the linear scan hit backup.
+    assert calls["n"] == 3
+
+
+def test_provider_router_preserves_last_error_when_all_clients_fail():
+    class Failing:
+        async def is_healthy(self):
+            return True
+
+        async def send(self, op, payload, **kwargs):
+            raise ValueError("specific error")
+
+    p = ProviderRouter("p", [Failing()])
+    with pytest.raises(ValueError, match="specific error"):
+        asyncio.run(p.handle("chat", {"prompt": "hi"}))
 
 
 def test_provider_router_scheduler_retries_transient_errors():
@@ -209,16 +301,19 @@ def test_client_node_healthy_after_no_failures():
 
 
 def test_client_node_unhealthy_during_cooldown():
-    node = healthy_node("k1")
-    node.failures = 1
-    node.cooldown_until = _utcnow() + timedelta(seconds=60)
+    node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
+    node.circuit_breaker.record_failure()
     assert asyncio.run(node.is_healthy()) is False
 
 
-def test_client_node_recovers_after_cooldown_expires():
-    node = healthy_node("k1")
-    node.failures = 1
-    node.cooldown_until = _utcnow() - timedelta(seconds=1)
+def test_client_node_recovers_after_cooldown_expires(monkeypatch):
+    node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
+    node.circuit_breaker.record_failure()
+    assert asyncio.run(node.is_healthy()) is False
+
+    now = time.monotonic()
+    monkeypatch.setattr("llmrouterx.retry.circuit_breaker.time.monotonic", lambda: now + 61.0)
+
     assert asyncio.run(node.is_healthy()) is True
     assert node.failures == 0
     assert node.cooldown_until is None
@@ -232,14 +327,13 @@ def test_client_node_healthy_when_circuit_breaker_disabled():
         cooldown_seconds=60,
         circuit_breaker_enabled=False,
     )
-    node.failures = 10
-    node.cooldown_until = _utcnow()
+    node.last_failure = _utcnow()
     assert asyncio.run(node.is_healthy()) is True
 
 
 def test_client_node_check_health_during_cooldown_false():
-    node = healthy_node("k1")
-    node.cooldown_until = _utcnow() + timedelta(seconds=60)
+    node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
+    node.circuit_breaker.record_failure()
     assert asyncio.run(node.check_health(force=False)) is False
 
 
@@ -266,9 +360,10 @@ def test_client_node_not_saturated_below_limit():
 
 def test_client_node_reset_clears_failure_state():
     node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
-    node.failures = 3
-    node.cooldown_until = _utcnow() + timedelta(seconds=60)
     node.circuit_breaker.record_failure()
+    node.circuit_breaker.record_failure()
+    node.circuit_breaker.record_failure()
+    assert node.failures == 3
 
     asyncio.run(node.reset())
     assert node.failures == 0

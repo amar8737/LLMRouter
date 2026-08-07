@@ -14,10 +14,6 @@ class CircuitState(str, Enum):
     HALF_OPEN = "HALF_OPEN"
 
 
-def _monotonic() -> float:
-    return time.monotonic()
-
-
 class CircuitBreaker:
     """
     Circuit breaker pattern to prevent cascading failures.
@@ -31,6 +27,11 @@ class CircuitBreaker:
     consecutive failures exceeds ``failure_threshold``, the circuit opens.
     After ``reset_timeout`` seconds, it transitions to HALF_OPEN. A successful
     request in HALF_OPEN closes the circuit; a failure re-opens it.
+
+    The ``state`` property is a pure read. Time-based transitions are explicit:
+    call :meth:`maybe_advance` (OPEN -> HALF_OPEN) or :meth:`reset_if_expired`
+    (OPEN -> CLOSED, full recovery) at the appropriate point in the request
+    flow.
     """
 
     def __init__(
@@ -51,6 +52,23 @@ class CircuitBreaker:
 
     @property
     def state(self) -> CircuitState:
+        """Current breaker state. Pure read — no side effects."""
+        with self._lock:
+            return self._state
+
+    @property
+    def failure_count(self) -> int:
+        """Number of consecutive failures currently recorded."""
+        with self._lock:
+            return self._failure_count
+
+    def maybe_advance(self) -> None:
+        """
+        Transition OPEN -> HALF_OPEN once the reset timeout has elapsed.
+
+        Intended for the request-gating path (``allow_request``): a breaker
+        that has cooled down allows a limited number of trial requests.
+        """
         with self._lock:
             if (
                 self._state == CircuitState.OPEN
@@ -59,18 +77,50 @@ class CircuitBreaker:
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_calls = 0
                 logger.info("Circuit breaker transitioning to HALF_OPEN")
-            return self._state
+
+    def reset_if_expired(self) -> bool:
+        """
+        Fully recover an OPEN breaker once its cooldown has elapsed.
+
+        Returns ``True`` if the breaker was reset, ``False`` otherwise. Used
+        by health checks that treat "cooldown expired" as a full recovery.
+        """
+        with self._lock:
+            if (
+                self._state == CircuitState.OPEN
+                and time.monotonic() - self._last_failure_time >= self._reset_timeout
+            ):
+                self._state = CircuitState.CLOSED
+                self._failure_count = 0
+                self._half_open_calls = 0
+                logger.info("Circuit breaker recovered to CLOSED after cooldown")
+                return True
+            return False
+
+    def cooldown_remaining(self) -> float | None:
+        """
+        Seconds left before an OPEN breaker may retry, or None when not OPEN.
+        """
+        with self._lock:
+            if self._state != CircuitState.OPEN:
+                return None
+            remaining = self._last_failure_time + self._reset_timeout - time.monotonic()
+            return max(0.0, remaining)
 
     def allow_request(self) -> bool:
+        self.maybe_advance()
+
         current = self.state
         if current == CircuitState.CLOSED:
             return True
+
         if current == CircuitState.HALF_OPEN:
             with self._lock:
                 if self._half_open_calls < self._half_open_max_calls:
                     self._half_open_calls += 1
                     return True
             return False
+
         return False
 
     def record_success(self) -> None:
@@ -106,4 +156,7 @@ class CircuitBreaker:
             self._half_open_calls = 0
 
     def __repr__(self) -> str:
-        return f"CircuitBreaker(state={self.state.value}, failures={self._failure_count})"
+        with self._lock:
+            state = self._state
+            failures = self._failure_count
+        return f"CircuitBreaker(state={state.value}, failures={failures})"

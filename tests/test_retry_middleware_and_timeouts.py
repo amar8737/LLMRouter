@@ -184,6 +184,24 @@ def test_total_timeout_ok_when_under_limit():
     assert result == "slow-done"
 
 
+def test_total_timeout_cancels_inflight_request():
+    import time
+
+    node = ClientNode("k1", SlowClient(), timeout=None)
+    provider = ProviderRouter("p1", [node])
+    composite = CompositeRouter([provider])
+    router = LLMRouter(composite, total_timeout=0.1)
+
+    start = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(router.chat("hi"))
+    elapsed = time.monotonic() - start
+
+    # The provider call sleeps 0.5s; the global deadline must interrupt it
+    # instead of waiting for it to finish (i.e. a real cancellation).
+    assert elapsed < 0.4
+
+
 # --- Fix 5: health check timeout --------------------------------------
 
 
@@ -223,6 +241,38 @@ def test_transient_failures_not_counted_by_default():
 
 async def _raise_http_500():
     raise HTTPError(500, "boom")
+
+
+def test_permanent_4xx_not_counted_as_failure():
+    node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
+
+    async def fail_with_401():
+        with suppress(HTTPError):
+            await node.execute(_raise_http_401())
+        assert node.failures == 0
+        assert await node.is_healthy() is True
+
+    asyncio.run(fail_with_401())
+
+
+async def _raise_http_401():
+    raise HTTPError(401, "unauthorized")
+
+
+def test_non_retryable_5xx_still_counts_as_failure():
+    node = ClientNode("k1", StubClient("a"), failure_threshold=1, cooldown_seconds=60)
+
+    async def fail_with_501():
+        with suppress(HTTPError):
+            await node.execute(_raise_http_501())
+        assert node.failures == 1
+        assert await node.is_healthy() is False
+
+    asyncio.run(fail_with_501())
+
+
+async def _raise_http_501():
+    raise HTTPError(501, "not implemented")
 
 
 def test_transient_failures_counted_when_opted_in():

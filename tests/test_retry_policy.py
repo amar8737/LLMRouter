@@ -95,6 +95,29 @@ def test_jitter_scales_backoff():
         assert 0.5 * expected <= value <= 1.5 * expected
 
 
+def test_jitter_never_exceeds_max_backoff():
+    r = ExponentialRetry(max_retries=3, base=10.0, factor=1.0, max_backoff=10.0, jitter=True)
+    for attempt in range(1, 4):
+        for _ in range(50):
+            value = r.get_backoff(HTTPError(500, "x"), attempt)
+            assert value <= 10.0
+
+
+def test_rate_limit_min_backoff_floor_survives_jitter():
+    r = ExponentialRetry(
+        max_retries=3,
+        base=100.0,
+        factor=1.0,
+        max_backoff=200.0,
+        jitter=True,
+        rate_limit_min_backoff=30.0,
+    )
+    for _ in range(100):
+        value = r.get_backoff(HTTPError(429, "limited"), attempt=1)
+        assert value >= 30.0
+        assert value <= 200.0
+
+
 @pytest.mark.asyncio
 async def test_wait_sleeps_for_backoff():
     r = ExponentialRetry(max_retries=3, base=0.05, factor=1.0, max_backoff=1.0, jitter=False)

@@ -267,13 +267,31 @@ class LLMRouter:
                     )
 
                 try:
-                    response = await self._router.handle(
-                        op,
-                        payload,
-                    )
+                    if deadline is not None:
+                        remaining = deadline - time.perf_counter()
 
-                    context.provider = self._router.last_provider
-                    context.api_key = self._router.last_api_key
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError(
+                                f"'{op}' exceeded total_timeout={self._total_timeout}s"
+                            )
+
+                        response = await asyncio.wait_for(
+                            self._router.handle(
+                                op,
+                                payload,
+                                context=context,
+                            ),
+                            timeout=remaining,
+                        )
+                    else:
+                        response = await self._router.handle(
+                            op,
+                            payload,
+                            context=context,
+                        )
+
+                    context.provider = context.provider or self._router.last_provider
+                    context.api_key = context.api_key or self._router.last_api_key
 
                     if deadline is not None and time.perf_counter() >= deadline:
                         self.metrics.incr(f"errors.{op}.total_timeout")

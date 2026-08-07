@@ -306,7 +306,8 @@ async def test_per_key_circuit_breaker_opens_after_threshold():
             self.set_handler(self._handle)
 
         async def _handle(self, op, kwargs):
-            raise SDKError(400, "boom")
+            # 501 is a non-retryable server error: an availability failure.
+            raise SDKError(501, "boom")
 
     adapter = OpenAICompatibleAdapter(client=AlwaysFail(), default_model="m")
     node = ClientNode("k1", adapter, failure_threshold=2, cooldown_seconds=30)
@@ -320,6 +321,31 @@ async def test_per_key_circuit_breaker_opens_after_threshold():
 
     assert node.circuit_breaker.state.name == "OPEN"
     assert await node.is_healthy() is False
+
+
+@pytest.mark.asyncio
+async def test_per_key_circuit_breaker_ignores_permanent_4xx():
+    class Always400(SDKClientBase):
+        def __init__(self):
+            super().__init__()
+            self.set_handler(self._handle)
+
+        async def _handle(self, op, kwargs):
+            raise SDKError(400, "bad request")
+
+    adapter = OpenAICompatibleAdapter(client=Always400(), default_model="m")
+    node = ClientNode("k1", adapter, failure_threshold=1, cooldown_seconds=30)
+    provider = ProviderRouter("p1", [node])
+    router = LLMRouter(CompositeRouter([provider]))
+
+    with suppress(Exception):
+        await router.chat("a")
+    with suppress(Exception):
+        await router.chat("b")
+
+    assert node.circuit_breaker.state.name == "CLOSED"
+    assert node.failures == 0
+    assert await node.is_healthy() is True
 
 
 @pytest.mark.asyncio
