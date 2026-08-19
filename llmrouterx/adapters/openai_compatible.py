@@ -5,6 +5,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from ..retry.exponential import HTTPError
+from ..types import RerankResultDict
 from .base import (
     BaseProviderAdapter,
     translate_async_errors,
@@ -175,7 +176,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         context: RequestContext | None = None,
         top_n: int | None = None,
         **kwargs: Any,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RerankResultDict]:
 
         client = self.client
         rerank_api = getattr(client, "rerank", None)

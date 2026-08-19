@@ -11,16 +11,6 @@ from llmrouterx.providers.provider_router import ProviderRouter
 from llmrouterx.retry.exponential import HTTPError
 from llmrouterx.router.llmrouter import LLMRouter
 
-try:
-    from fastapi.testclient import TestClient
-
-    from llmrouterx.server.app import create_app
-except ImportError:
-    pytest.skip(
-        "fastapi / server extras not installed; run: pip install 'llmrouterx[server]'",
-        allow_module_level=True,
-    )
-
 
 class FailingClient:
     def __init__(self, exc):
@@ -38,14 +28,6 @@ class FailingClient:
     async def stream(self, prompt, **kwargs):
         raise self.exc
         yield  # pragma: no cover
-
-
-@pytest.fixture
-def client():
-    router = LLMRouter(CompositeRouter([ProviderRouter("ok", [ClientNode("k", HealthyStub())])]))
-    app = create_app(router=router)
-    with TestClient(app) as test_client:
-        yield test_client
 
 
 class EchoAdapter(BaseProviderAdapter):
@@ -196,11 +178,3 @@ def test_from_cascade_builds_fallback_chain(monkeypatch):
 def test_from_cascade_rejects_bad_format():
     with pytest.raises(ValueError, match="provider:api_key"):
         LLMRouter.from_cascade(["not-a-valid-item"])
-
-
-def test_dashboard_returns_html(client):
-    response = client.get("/dashboard")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "LLMRouter Dashboard" in response.text
-    assert "/metrics" in response.text

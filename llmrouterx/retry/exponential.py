@@ -4,25 +4,12 @@ import asyncio
 import random
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+
+from ..exceptions import HTTPError
+from .base import BaseRetry
 
 
-class HTTPError(Exception):
-    """Generic HTTP error."""
-
-    def __init__(
-        self,
-        status_code: int,
-        message: str = "HTTP error",
-        *,
-        headers: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(f"{status_code}: {message}")
-        self.status_code = status_code
-        self.headers = headers or {}
-
-
-class ExponentialRetry:
+class ExponentialRetry(BaseRetry):
     """
     Exponential backoff retry policy.
 
@@ -139,15 +126,3 @@ class ExponentialRetry:
             delay = max(delay, self.rate_limit_min_backoff)
 
         return min(delay, self.max_backoff)
-
-    async def wait(
-        self,
-        exc: Exception,
-        attempt: int,
-    ) -> None:
-        await asyncio.sleep(
-            self.get_backoff(
-                exc,
-                attempt,
-            )
-        )

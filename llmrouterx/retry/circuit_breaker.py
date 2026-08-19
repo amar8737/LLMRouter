@@ -67,6 +67,17 @@ class CircuitBreaker:
         with self._lock:
             return self._failure_count
 
+    def _maybe_transition_to_half_open(self) -> None:
+        """Internal: transition OPEN -> HALF_OPEN if cooldown elapsed."""
+        if (
+            self._state == CircuitState.OPEN
+            and time.monotonic() - self._last_failure_time >= self._reset_timeout
+        ):
+            self._state = CircuitState.HALF_OPEN
+            self._half_open_calls = 0
+            self._half_open_successes = 0
+            logger.info("Circuit breaker transitioning to HALF_OPEN")
+
     def maybe_advance(self) -> None:
         """
         Transition OPEN -> HALF_OPEN once the reset timeout has elapsed.
@@ -75,14 +86,7 @@ class CircuitBreaker:
         that has cooled down allows a limited number of trial requests.
         """
         with self._lock:
-            if (
-                self._state == CircuitState.OPEN
-                and time.monotonic() - self._last_failure_time >= self._reset_timeout
-            ):
-                self._state = CircuitState.HALF_OPEN
-                self._half_open_calls = 0
-                self._half_open_successes = 0
-                logger.info("Circuit breaker transitioning to HALF_OPEN")
+            self._maybe_transition_to_half_open()
 
     def reset_if_expired(self) -> bool:
         """
@@ -120,14 +124,7 @@ class CircuitBreaker:
         # waiter cannot reopen the breaker between the transition check and the
         # slot allocation (TOCTOU).
         with self._lock:
-            if (
-                self._state == CircuitState.OPEN
-                and time.monotonic() - self._last_failure_time >= self._reset_timeout
-            ):
-                self._state = CircuitState.HALF_OPEN
-                self._half_open_calls = 0
-                self._half_open_successes = 0
-                logger.info("Circuit breaker transitioning to HALF_OPEN")
+            self._maybe_transition_to_half_open()
 
             if self._state == CircuitState.CLOSED:
                 return True

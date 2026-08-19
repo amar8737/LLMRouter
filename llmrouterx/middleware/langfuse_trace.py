@@ -163,7 +163,6 @@ class LangfuseMiddleware(BaseMiddleware):
             status_message=f"{type(exception).__name__}: {exception}",
         )
 
-
     def flush(self) -> None:
         """Flush pending traces (call on application shutdown)."""
         try:

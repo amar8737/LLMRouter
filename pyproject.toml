@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmrouterx"
-version = "0.1.17"
+version = "0.1.18"
 description = "Intelligent routing, load balancing, and failover for LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,13 +39,6 @@ openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
 cohere = ["cohere>=5.0"]
 langfuse = ["langfuse>=3.0"]
-server = [
-	"fastapi>=0.100.0",
-	"uvicorn>=0.23.0",
-	"pydantic>=2.0.0",
-	"httpx[http2]>=0.24.0",
-	"uvloop>=0.17.0; platform_system != 'Windows'",
-]
 
 [project.scripts]
 llmrouterx = "llmrouterx.cli:main"
@@ -74,27 +67,22 @@ no_implicit_optional = true
 show_error_codes = true
 check_untyped_defs = false
 
-# Optional runtime extras (httpx, langfuse, fastapi, pydantic, starlette,
-# uvicorn) are not installed in minimal/typecheck-only environments, so mypy
-# must not treat their absence as an error. When an extra *is* installed mypy
-# still uses its real types. Provider SDKs are imported lazily / guarded with
+# Optional runtime extras (httpx, langfuse) are not installed in
+# minimal/typecheck-only environments, so mypy must not treat their absence
+# as an error. When an extra *is* installed mypy still uses its real types.
+# Provider SDKs are imported lazily / guarded with
 # inline ``# type: ignore[import-not-found]`` and are not listed here.
 [[tool.mypy.overrides]]
 module = [
     "httpx",
     "langfuse",
-    "fastapi",
-    "fastapi.*",
-    "pydantic",
-    "pydantic.*",
-    "starlette",
-    "starlette.*",
-    "uvicorn",
 ]
 ignore_missing_imports = true
-# Optional extras can be absent (CI lint) or present alongside incompatible
-# transitive stubs (e.g. an older numpy). Treat them as Any instead of
-# following their bodies, so ``mypy llmrouterx`` is stable across environments.
+# numpy 2.x stubs have Python 3.12+ syntax that breaks on 3.13.
+# Skip checking numpy internals.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+ignore_missing_imports = true
 follow_imports = "skip"
 
 [tool.ruff]

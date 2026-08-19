@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from ..adapters.base import BaseProviderAdapter
+from ..types import BaseProviderAdapterProtocol
 from .async_stream import AsyncStreamEngine
 from .sync import SyncStreamEngine
 from .tokenizer import TokenizerManager, default_tokenizer
@@ -26,7 +26,7 @@ class StreamingManager:
 
     def __init__(
         self,
-        adapter: BaseProviderAdapter,
+        adapter: BaseProviderAdapterProtocol,
         *,
         tokenizer: TokenizerManager | None = None,
     ) -> None:

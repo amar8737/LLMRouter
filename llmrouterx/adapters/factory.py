@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from ..exceptions import ConfigurationError
+from ..types import BaseProviderAdapterProtocol, SDKClient
 from .anthropic import AnthropicAdapter
 from .azure import AzureOpenAIAdapter
 from .base import BaseProviderAdapter
@@ -86,10 +87,10 @@ class AdapterFactory:
         cls,
         *,
         provider: str,
-        client: Any,
+        client: SDKClient,
         default_model: str | None = None,
         embedding_model: str | None = None,
-    ) -> BaseProviderAdapter:
+    ) -> BaseProviderAdapterProtocol:
         """
         Create an adapter instance for the requested provider.
         """

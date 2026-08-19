@@ -163,6 +163,20 @@ def _default_sdk_client(provider: str, api_key: str) -> Any:
             http_client=_get_shared_http_client(),
         )
 
+    if provider == "nim":
+        try:
+            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise ConfigurationError(
+                "Provider 'nim' requires the 'openai' package. "
+                "Install it with: pip install llmrouterx[openai]"
+            ) from exc
+        return AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://integrate.api.nvidia.com/v1",
+            http_client=_get_shared_http_client(),
+        )
+
     try:
         from openai import AsyncOpenAI  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover

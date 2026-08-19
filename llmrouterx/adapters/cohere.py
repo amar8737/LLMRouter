@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ..retry.exponential import HTTPError
+from ..types import RerankResultDict
 from .base import (
     BaseProviderAdapter,
     translate_async_errors,
@@ -100,7 +101,7 @@ class CohereAdapter(BaseProviderAdapter):
         context: RequestContext | None = None,
         top_n: int | None = None,
         **kwargs: Any,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RerankResultDict]:
 
         params: dict[str, Any] = {
             "model": model or self.default_model,

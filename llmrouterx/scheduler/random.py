@@ -11,11 +11,7 @@ if TYPE_CHECKING:
 
 class RandomScheduler(BaseScheduler):
     async def select(self, provider_router: ProviderRouter) -> Any:
-        healthy = [
-            c
-            for c in provider_router.clients
-            if await c.is_healthy() and not getattr(c, "is_saturated", False)
-        ]
+        healthy = await self._healthy_clients(provider_router)
         if not healthy:
             return None
         return random.choice(healthy)

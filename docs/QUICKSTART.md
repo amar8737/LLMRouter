@@ -49,11 +49,13 @@ curl -X POST localhost:8000/v1/chat/completions \
 ```python
 from llmrouterx import LLMRouter
 
-router = LLMRouter.from_cascade([
-    "openai:sk-...",
-    "anthropic:sk-ant-...",
-    "groq:gsk-...",
-])
+router = LLMRouter.from_cascade(
+    [
+        "openai:sk-...",
+        "anthropic:sk-ant-...",
+        "groq:gsk-...",
+    ]
+)
 
 response = await router.chat(prompt="Hello!")
 ```
@@ -65,11 +67,13 @@ Each `"provider:api_key"` becomes a fallback provider in order. Keys can be lite
 ```python
 from llmrouterx import LLMRouter
 
-router = LLMRouter.from_providers([
-    {"provider": "openai", "key_env": "OPENAI_API_KEY", "model": "gpt-4o"},
-    {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b-versatile"},
-    {"provider": "anthropic", "key": "sk-ant-...", "model": "claude-3-5-sonnet-20241022"},
-])
+router = LLMRouter.from_providers(
+    [
+        {"provider": "openai", "key_env": "OPENAI_API_KEY", "model": "gpt-4o"},
+        {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b-versatile"},
+        {"provider": "anthropic", "key": "sk-ant-...", "model": "claude-3-5-sonnet-20241022"},
+    ]
+)
 
 response = await router.chat(prompt="Hello!")
 ```
@@ -116,6 +120,7 @@ from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
 
+
 async def main():
     keys = ["sk-key1", "sk-key2", "sk-key3"]
     nodes = [ClientNode(key, AsyncOpenAI(api_key=key)) for key in keys]
@@ -131,6 +136,7 @@ async def main():
     response = await router.chat(prompt="Hello!")
     print(response)
 
+
 asyncio.run(main())
 ```
 
@@ -144,6 +150,7 @@ from llmrouterx import LLMRouter
 from llmrouterx.client import ClientNode
 from llmrouterx.providers import ProviderRouter, CompositeRouter
 from llmrouterx.scheduler import LeastBusyScheduler
+
 
 async def main():
     # OpenAI (primary)
@@ -161,6 +168,7 @@ async def main():
     response = await router.chat(prompt="Hello!")
     print(response)
 
+
 asyncio.run(main())
 ```
 
@@ -169,6 +177,7 @@ asyncio.run(main())
 ```python
 from llmrouterx.scheduler import BaseScheduler
 
+
 class PriorityScheduler(BaseScheduler):
     async def select(self, provider_router):
         candidates = [c for c in provider_router.clients if await c.is_healthy()]
@@ -176,6 +185,7 @@ class PriorityScheduler(BaseScheduler):
             return None
         candidates.sort(key=lambda c: getattr(c, "priority", 0), reverse=True)
         return candidates[0]
+
 
 # Use it
 premium_node = ClientNode("premium-key", client)
@@ -248,6 +258,7 @@ from llmrouterx import LLMRouter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class LoggingMiddleware(BaseMiddleware):
     async def before_request(self, operation, payload, context):
         logger.info(f"→ {operation}: {payload}")
@@ -256,6 +267,7 @@ class LoggingMiddleware(BaseMiddleware):
     async def after_response(self, operation, payload, response, context):
         logger.info(f"← {operation}: {response}")
         return response
+
 
 router = LLMRouter(composite, middleware=[LoggingMiddleware()])
 ```

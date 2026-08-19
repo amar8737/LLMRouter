@@ -8,6 +8,11 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 from ..retry.exponential import HTTPError
+from ..types import (
+    BaseProviderAdapterProtocol,
+    RerankResultDict,
+    SDKClient,
+)
 
 if TYPE_CHECKING:
     from ..context.request_context import RequestContext
@@ -136,7 +141,7 @@ def translate_stream_errors(func):
     return wrapper
 
 
-class BaseProviderAdapter(ABC):
+class BaseProviderAdapter(ABC, BaseProviderAdapterProtocol):
     """
     Base class for every provider adapter.
 
@@ -151,7 +156,7 @@ class BaseProviderAdapter(ABC):
 
     def __init__(
         self,
-        client: Any,
+        client: SDKClient,
         *,
         default_model: str | None = None,
         embedding_model: str | None = None,
@@ -161,7 +166,7 @@ class BaseProviderAdapter(ABC):
         self._embedding_model = embedding_model
 
     @property
-    def client(self) -> Any:
+    def client(self) -> SDKClient:
         return self._client
 
     @property
@@ -239,7 +244,7 @@ class BaseProviderAdapter(ABC):
         context: RequestContext | None = None,
         top_n: int | None = None,
         **kwargs: Any,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RerankResultDict]:
         """
         Optional reranking endpoint.
 
@@ -266,12 +271,12 @@ class BaseProviderAdapter(ABC):
         *,
         index_field: str = "index",
         score_field: str = "relevance_score",
-    ) -> list[dict[str, Any]]:
+    ) -> list[RerankResultDict]:
         """
         Normalize provider rerank results into ``[{index, relevance_score}]``
         sorted by score descending.
         """
-        normalized: list[dict[str, Any]] = []
+        normalized: list[RerankResultDict] = []
         for item in results:
             if not isinstance(item, dict):
                 if hasattr(item, "model_dump"):

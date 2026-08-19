@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections import defaultdict, deque
 from statistics import mean, median
-from threading import Lock
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,8 @@ class MetricsCollector:
 
     Keeps a bounded history of timings and a bounded number of
     distinct counter keys to avoid unbounded memory growth.
+
+    All methods are synchronous and use threading.Lock for thread-safe operation.
     """
 
     def __init__(
@@ -25,7 +27,7 @@ class MetricsCollector:
         max_timing_keys: int = 500,
     ) -> None:
 
-        self._lock = Lock()
+        self._lock = threading.Lock()
 
         self._max_samples = max_samples
         self._max_counter_keys = max_counter_keys
@@ -38,7 +40,7 @@ class MetricsCollector:
         self._timings: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=max_samples))
 
         self._labeled_timings: dict[str, dict[str, deque[float]]] = defaultdict(
-            lambda: defaultdict(lambda: deque(maxlen=max_samples))
+            lambda: defaultdict(lambda: deque(maxlen=max_samples))  # type: ignore[return-value]
         )
 
     # -------------------------------------------------------
@@ -97,8 +99,8 @@ class MetricsCollector:
                     self._labeled_timings.pop(oldest, None)
                 self._timings[key] = deque(maxlen=self._max_samples)
                 self._labeled_timings[key] = defaultdict(
-                    lambda: deque(maxlen=self._max_samples)
-                )
+                    lambda: defaultdict(lambda: deque(maxlen=self._max_samples))  # type: ignore[return-value]
+                )  # type: ignore[assignment]
             self._timings[key].append(seconds)
 
             if labels:

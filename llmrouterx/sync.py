@@ -25,6 +25,7 @@ from collections.abc import Generator
 from typing import Any
 
 from .config.config import RouterConfig
+from .providers.composite_router import CompositeRouter
 from .router.llmrouter import LLMRouter
 from .streaming.sync import _get_shared_loop, shutdown_sync_engine
 
@@ -44,6 +45,16 @@ def _run_on_loop(fn: Any, *, timeout: float | None = None) -> Any:
     return future.result(timeout=timeout)
 
 
+def _extract_token_text(token: Any) -> str:
+    """Extract text from a token which may be a string or dict."""
+    if isinstance(token, str):
+        return token
+    if isinstance(token, dict):
+        # Common keys used by different adapters
+        return token.get("text") or token.get("response") or token.get("content") or ""
+    return str(token)
+
+
 class LLMRouterSync:
     """
     Blocking, synchronous wrapper around :class:`LLMRouter`.
@@ -55,13 +66,19 @@ class LLMRouterSync:
 
     _router: LLMRouter
 
-    def __init__(self, router: LLMRouter | LLMRouterSync | None = None) -> None:
+    def __init__(
+        self,
+        router: LLMRouter | CompositeRouter | LLMRouterSync | None = None,
+    ) -> None:
         if isinstance(router, LLMRouterSync):
             router = router._router
+        if isinstance(router, CompositeRouter):
+            router = LLMRouter(router)
         if router is None:
             raise ValueError(
-                "LLMRouterSync needs an LLMRouter. Use LLMRouterSync.from_cascade(...), "
-                "LLMRouterSync.from_providers(...), or LLMRouterSync.from_config(...)."
+                "LLMRouterSync needs an LLMRouter, CompositeRouter, or another LLMRouterSync. "
+                "Use LLMRouterSync.from_cascade(...), LLMRouterSync.from_providers(...), "
+                "or LLMRouterSync.from_config(...)."
             )
         self._router = router
 
@@ -119,7 +136,7 @@ class LLMRouterSync:
 
     def stream_chunks(self, prompt: str, **kwargs: Any) -> Generator[str, None, None]:
         """Yield streamed tokens as they arrive, blocking between tokens."""
-        q: queue.Queue[str | None] = queue.Queue()
+        q: queue.Queue[Any | None] = queue.Queue()
         error: list[BaseException | None] = [None]
 
         async def runner() -> None:
@@ -141,7 +158,7 @@ class LLMRouterSync:
                 token = q.get()
                 if token is None:
                     break
-                yield token
+                yield _extract_token_text(token)
         finally:
             if not future.done():
                 future.cancel()

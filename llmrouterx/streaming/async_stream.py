@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from ..adapters.base import BaseProviderAdapter
+from ..types import BaseProviderAdapterProtocol
 
 
 class AsyncStreamEngine:
@@ -20,7 +20,7 @@ class AsyncStreamEngine:
 
     def __init__(
         self,
-        adapter: BaseProviderAdapter,
+        adapter: BaseProviderAdapterProtocol,
     ) -> None:
         self._adapter = adapter
 

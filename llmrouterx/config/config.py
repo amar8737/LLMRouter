@@ -199,8 +199,7 @@ class RouterConfig:
             if path.endswith((".yaml", ".yml")):
                 if yaml is None:
                     raise ImportError(
-                        "PyYAML is required for YAML config files. "
-                        "Install with: pip install pyyaml"
+                        "PyYAML is required for YAML config files. Install with: pip install pyyaml"
                     )
                 data = yaml.safe_load(handle)
             else:
@@ -236,25 +235,25 @@ class RouterConfig:
             if "clients" in p:
                 # Explicit clients list provided
                 for c in p["clients"]:
-                    client_dict = dict(c)
-                    client_dict.setdefault("client", provider_name)
-                    clients.append(client_dict)
+                    client_cfg_inner = dict(c)
+                    client_cfg_inner.setdefault("client", provider_name)
+                    clients.append(client_cfg_inner)
             else:
                 # Build single client from provider fields
-                client_dict: dict[str, Any] = {"client": provider_name}
+                client_cfg_outer: dict[str, Any] = {"client": provider_name}
                 if p.get("key"):
-                    client_dict["api_key"] = p["key"]
+                    client_cfg_outer["api_key"] = p["key"]
                 if p.get("key_env"):
-                    client_dict["api_key_env"] = p["key_env"]
+                    client_cfg_outer["api_key_env"] = p["key_env"]
                 if p.get("key_file"):
-                    client_dict["api_key_file"] = p["key_file"]
+                    client_cfg_outer["api_key_file"] = p["key_file"]
                 if p.get("model"):
-                    client_dict["default_model"] = p["model"]
+                    client_cfg_outer["default_model"] = p["model"]
                 if p.get("embedding_model"):
-                    client_dict["embedding_model"] = p["embedding_model"]
+                    client_cfg_outer["embedding_model"] = p["embedding_model"]
                 if p.get("base_url"):
-                    client_dict["base_url"] = p["base_url"]
-                clients.append(client_dict)
+                    client_cfg_outer["base_url"] = p["base_url"]
+                clients.append(client_cfg_outer)
 
             provider_dict: dict[str, Any] = {
                 "name": provider_name,

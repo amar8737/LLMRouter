@@ -7,11 +7,11 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..adapters.base import BaseProviderAdapter
 from ..exceptions import ConfigurationError
 from ..retry.circuit_breaker import CircuitBreaker, CircuitState
 from ..retry.exponential import ExponentialRetry, HTTPError
 from ..streaming.manager import StreamingManager
+from ..types import BaseProviderAdapterProtocol
 from ..utils.masking import mask_api_key
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class ClientNode:
     def __init__(
         self,
         api_key: str,
-        client: BaseProviderAdapter,
+        client: BaseProviderAdapterProtocol,
         *,
         streaming: StreamingManager | None = None,
         timeout: float | None = 60.0,

@@ -1,16 +1,11 @@
+from typing import Any
+
+
 class RouterError(Exception):
     pass
 
 
 class ProviderError(RouterError):
-    pass
-
-
-class RetryError(RouterError):
-    pass
-
-
-class SchedulerError(RouterError):
     pass
 
 
@@ -37,5 +32,16 @@ class ConfigurationError(RouterError):
     pass
 
 
-class AuthenticationError(RouterError):
-    pass
+class HTTPError(Exception):
+    """Generic HTTP error."""
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str = "HTTP error",
+        *,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(f"{status_code}: {message}")
+        self.status_code = status_code
+        self.headers = headers or {}

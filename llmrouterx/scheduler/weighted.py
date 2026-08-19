@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import random
 from typing import TYPE_CHECKING, Any
 
@@ -15,25 +14,19 @@ class WeightedScheduler(BaseScheduler):
     """Choose a healthy client randomly weighted by `weight` attribute (default 1)."""
 
     async def select(self, provider_router: ProviderRouter) -> Any:
-        clients = provider_router.clients
-        if not clients:
+        healthy_clients = await self._healthy_clients(provider_router)
+        if not healthy_clients:
             return None
+
         weighted = []
-        for c in clients:
-            try:
-                if await c.is_healthy() and not getattr(c, "is_saturated", False):
-                    w = getattr(c, "weight", 1)
-                    if w < 0:
-                        raise ConfigurationError(
-                            f"Negative weight {w} for client {c}"
-                        )
-                    if w == 0:
-                        # Zero-weight clients are excluded from selection.
-                        continue
-                    weighted.append((c, float(w)))
-            except (AttributeError, RuntimeError, OSError, TypeError) as e:
-                logging.debug("weighted scheduler: skipping client due to error: %s", e)
+        for c in healthy_clients:
+            w = getattr(c, "weight", 1)
+            if w < 0:
+                raise ConfigurationError(f"Negative weight {w} for client {c}")
+            if w == 0:
                 continue
+            weighted.append((c, float(w)))
+
         if not weighted:
             return None
         total = sum(w for _, w in weighted)

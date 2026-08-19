@@ -39,7 +39,6 @@ response = router.chat("Hello!")
 - 📝 **Structured Logging** — Built-in JSON formatter for machine-readable logs
 - 🛡️ **Error Handling** — Graceful degradation with meaningful exceptions
 - 🔐 **Gateway Auth** — optional bearer-token tiers (admin for `/dashboard`+`/metrics`, API key for `/v1/*`) via `create_app(..., admin_token=, api_keys=)` or env/CLI
-- 🖥️ **HTTP Gateway** — OpenAI-compatible server (`/v1/chat/completions`, streaming, health, metrics, dashboard)
 - 📄 **Declarative Config** — **YAML/JSON** config files with env/file-based key loading (`api_key_env` / `api_key_file`)
 - 🔭 **Langfuse Tracing** — Zero-code observability via middleware
 - 📊 **Dashboard & Token Tracking** — zero-config UI plus global/per-provider token counters
@@ -58,13 +57,13 @@ Every operation routes through the same failover/retry/circuit-breaker pipeline.
 
 | Endpoint | `LLMRouter` (async) | `LLMRouterSync` | HTTP Gateway | Providers |
 |---|---|---|---|---|
-| Chat | `await router.chat(prompt)` | `router.chat(prompt)` | `POST /v1/chat/completions` | all |
-| Stream | `async for t in router.stream(...)` | `router.stream_chunks(...)` / `router.stream(...)` | same route, `stream: true` | all |
-| Embeddings | `await router.embeddings(text)` | `router.embeddings(text)` | `POST /v1/embeddings` | all |
-| Rerank | `await router.rerank(query, documents)` | `router.rerank(query, documents)` | `POST /v1/rerank` | Jina, Voyage, vLLM-style servers, Cohere |
+| Chat | `await router.chat(prompt)` | `router.chat(prompt)` | — | all |
+| Stream | `async for t in router.stream(...)` | `router.stream_chunks(...)` / `router.stream(...)` | — | all |
+| Embeddings | `await router.embeddings(text)` | `router.embeddings(text)` | — | all |
+| Rerank | `await router.rerank(query, documents)` | `router.rerank(query, documents)` | — | Jina, Voyage, vLLM-style servers, Cohere |
 | Responses API | `await router.responses(...)` | `router.responses(...)` | — | OpenAI |
-| Health | `await router.health()` | `router.health()` | `GET /health` | all |
-| Metrics | `router.get_metrics()` | `router.get_metrics()` | `GET /metrics` | all |
+| Health | `await router.health()` | `router.health()` | — | all |
+| Metrics | `router.get_metrics()` | `router.get_metrics()` | — | all |
 
 Rerank returns `[{index, relevance_score}, ...]` sorted by score descending,
 where `index` is the position of the document in the input list:
@@ -88,10 +87,10 @@ pip install llmrouterx
 
 ### With Extras
 ```bash
-pip install llmrouterx[server]      # HTTP gateway (FastAPI, Uvicorn, YAML, Prometheus, hot-reload, Jinja2)
 pip install llmrouterx[langfuse]    # Langfuse tracing
 pip install llmrouterx[openai]      # OpenAI SDK (for type hints)
-pip install llmrouterx[server,langfuse]  # Combined
+pip install llmrouterx[cohere]      # Cohere SDK
+pip install llmrouterx[anthropic]   # Anthropic SDK
 ```
 
 ### From Source (Development)
@@ -128,22 +127,7 @@ The router scans key *names*: give it `OPEN_AI_KEY` and it picks up
 `OPEN_AI_KEY`, `OPEN_AI_KEY_1`, `OPEN_AI_KEY_2`, ... automatically, stopping at
 the first gap — each found key becomes a rotating client.
 
-### 3. Zero-Config Server (No Config File Needed)
-
-```bash
-pip install llmrouterx[server]
-
-# Single provider
-llmrouterx serve --provider openai:sk-...@gpt-4o --port 8000
-
-# Fallback chain (first healthy wins)
-llmrouterx serve --fallback openai:sk-1 --fallback groq:gsk-2 --port 8000
-
-# Auto-discovers router.yaml / router.json in cwd
-llmrouterx serve --port 8000
-```
-
-### 4. Use the synchronous API
+### 3. Use the synchronous API
 ```python
 from llmrouterx import LLMRouterSync
 
@@ -156,7 +140,7 @@ print(response)
 That's it — no manual client wiring. Prefer async? The exact same setup works
 with `LLMRouter` + `await router.chat(...)`.
 
-### 5. Multiple providers with automatic failover
+### 4. Multiple providers with automatic failover
 ```python
 from llmrouterx import LLMRouterSync
 
@@ -171,7 +155,7 @@ router = LLMRouterSync.from_providers(
 print(router.chat("Hello!"))
 ```
 
-### 6. Run tests to verify installation
+### 5. Run tests to verify installation
 ```bash
 pip install pytest pytest-asyncio
 pytest tests/ -v
@@ -817,41 +801,6 @@ Supported environment variables:
 | `LLMROUTER_CB_THRESHOLD` | `5` | Failures before a key opens |
 | `LLMROUTER_CB_RESET_TIMEOUT` | `30` | Cooldown before a key is retried |
 
-### Gateway
-
-Run the OpenAI-compatible HTTP server with auth and observability. Install the
-`server` extra, then configure:
-
-```bash
-pip install llmrouterx[server]
-
-export LLMROUTER_ADMIN_TOKEN=admin-secret       # protects /dashboard, /metrics
-export LLMROUTER_API_KEYS=sk-openai-1,gsk-groq-1  # protects /v1/*
-export LLMROUTER_DOCS=0                         # hide /docs, /redoc
-
-# Quick start (no config file)
-llmrouterx serve --provider openai:sk-...@gpt-4o --port 8000
-
-# Fallback chain
-llmrouterx serve --fallback openai:sk-1 --fallback groq:gsk-2 --port 8000
-
-# With config file (YAML or JSON) - auto-discovers router.yaml/.json in cwd
-llmrouterx serve --config router.yaml --port 8000
-
-# Generate a starter config
-llmrouterx init --format yaml -o router.yaml
-
-# Validate a config file
-llmrouterx config validate router.yaml
-
-# Dev mode with hot reload and JSON logs
-llmrouterx serve --config router.yaml --hot-reload --log-format json
-```
-
-`LLMROUTER_API_KEYS` is comma-separated; each value is accepted as a bearer
-token on `/v1/models` and `/v1/chat/completions`. Omitting these vars leaves
-the gateway open (useful for local dev only). See [docs/SERVER.md](docs/SERVER.md).
-
 ### Loading Config from a JSON or YAML File
 
 Configs can be written as **YAML or JSON** and loaded with `RouterConfig.from_file` /
@@ -899,12 +848,15 @@ Use `RouterConfig.from_providers()` for a cleaner, type-safe config:
 ```python
 from llmrouterx.config import RouterConfig
 
-config = RouterConfig.from_providers([
-    {"provider": "openai", "key_env": "OPENAI_API_KEY", "model": "gpt-4o"},
-    {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b"},
-])
+config = RouterConfig.from_providers(
+    [
+        {"provider": "openai", "key_env": "OPENAI_API_KEY", "model": "gpt-4o"},
+        {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b"},
+    ]
+)
 
 from llmrouterx.router.factory import RouterFactory
+
 router = RouterFactory.build(config)
 ```
 
@@ -941,24 +893,6 @@ secrets and CI/CD environments.
 
 ---
 
-## 🌐 HTTP Gateway (Server)
-
-The `server` extra provides an OpenAI-compatible HTTP gateway and a CLI to run
-it, plus declarative config and key loading:
-
-```bash
-pip install llmrouterx[server]
-llmrouterx serve --config router.json --port 8000
-```
-
-Endpoints: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`
-(streaming and non-streaming), `GET /metrics`. Errors use the OpenAI-compatible
-`{"error": {"message", "type", "code"}}` envelope.
-
-See [docs/SERVER.md](docs/SERVER.md) for the full guide.
-
----
-
 ## 🔭 Observability (Langfuse)
 
 The `langfuse` extra records every routed operation as a Langfuse trace through
@@ -976,13 +910,7 @@ Tracing activates automatically when those variables are present (or via
 `chat`/`stream`/`embeddings` call becomes a Langfuse `generation` — its own
 auto-created trace — with input, output, model, provider, masked key suffix,
 retry count, latency, and `ERROR` levels on failures. Tracing is fail-open and
-never interrupts routing. The gateway flushes pending traces on clean shutdown.
-See [docs/SERVER.md](docs/SERVER.md#4-langfuse-tracing).
-
-`GET /dashboard` serves a zero-config auto-refreshing observability UI, and the
-`MetricsCollector` exposes global + per-provider token counters
-(`tokens.prompt.total`, `tokens.completion.total`, `tokens.total`). See
-[docs/SERVER.md](docs/SERVER.md#5-observability-errors--token-tracking).
+never interrupts routing.
 
 ---
 
@@ -1196,8 +1124,6 @@ Built with ❤️ for developers managing multiple LLM providers. Special thanks
 - Latency-aware routing
 - Response caching
 - **Auto-detect provider from key prefix (`sk-`→OpenAI, `gsk-`→Groq, etc.)**
-- **ServerConfig dataclass for cleaner `create_app()`**
-- **Enhanced dashboard with provider drill-down & trace view**
 
 **v0.3** (Future)
 - Region-aware routing

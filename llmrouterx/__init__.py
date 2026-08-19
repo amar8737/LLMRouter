@@ -22,6 +22,32 @@ from .scheduler import (
     WeightedScheduler,
 )
 from .sync import LLMRouterSync
+from .types import (
+    BaseProviderAdapterProtocol,
+    ChatCompletionDict,
+    ChatPayload,
+    CircuitBreakerProtocol,
+    ClientConfigDict,
+    ClientFactoryProtocol,
+    CompositeRouterProtocol,
+    EmbeddingPayload,
+    EmbeddingResponseDict,
+    MetricsCollectorProtocol,
+    MiddlewareProtocol,
+    OperationPayload,
+    ProviderConfigDict,
+    ProviderInfoDict,
+    ProviderRouterProtocol,
+    RerankPayload,
+    RerankResultDict,
+    RetryPolicyProtocol,
+    RouterConfigDict,
+    SchedulerProtocol,
+    SDKClient,
+    StreamChunkDict,
+    StreamPayload,
+    UsageDict,
+)
 
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -29,27 +55,51 @@ try:
     try:
         __version__ = version("llmrouterx")
     except PackageNotFoundError:
-        __version__ = "0.0.0"
+        __version__ = "0.1.18"
 except ImportError:  # pragma: no cover - pre-3.8 importlib.metadata shim
-    __version__ = "0.0.0"
+    __version__ = "0.1.18"
 
 __all__ = [
     "AdapterFactory",
     "BaseMiddleware",
     "BaseProviderAdapter",
+    "BaseProviderAdapterProtocol",
     "BaseScheduler",
+    "ChatCompletionDict",
+    "ChatPayload",
+    "CircuitBreakerProtocol",
+    "ClientConfigDict",
+    "ClientFactoryProtocol",
     "ClientNode",
     "CompositeRouter",
+    "CompositeRouterProtocol",
+    "EmbeddingPayload",
+    "EmbeddingResponseDict",
     "ExponentialRetry",
     "LLMRouter",
     "LLMRouterSync",
     "LeastBusyScheduler",
     "MetricsCollector",
+    "MetricsCollectorProtocol",
+    "MiddlewareProtocol",
+    "OperationPayload",
     "PriorityScheduler",
+    "ProviderConfigDict",
+    "ProviderInfoDict",
     "ProviderRouter",
+    "ProviderRouterProtocol",
     "RandomScheduler",
+    "RerankPayload",
+    "RerankResultDict",
+    "RetryPolicyProtocol",
     "RoundRobinScheduler",
     "RouterConfig",
+    "RouterConfigDict",
+    "SDKClient",
+    "SchedulerProtocol",
+    "StreamChunkDict",
+    "StreamPayload",
+    "UsageDict",
     "WeightedScheduler",
     "__version__",
 ]

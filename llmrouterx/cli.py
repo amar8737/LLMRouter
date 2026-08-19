@@ -1,37 +1,17 @@
 """Command-line interface for LLMRouter.
 
-The primary command is ``llmrouterx serve`` which launches the standalone
-OpenAI-compatible HTTP gateway backed by Uvicorn.
+Provides config management commands for LLMRouter.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import logging
 import sys
 from pathlib import Path
 from typing import Any
 
 from llmrouterx.config.config import RouterConfig
-
-
-def _use_uvloop() -> bool:
-    """Install uvloop as the event-loop policy where available.
-
-    Returns True when uvloop is in use, False when falling back to the
-    standard asyncio loop (e.g. platform lacks uvloop support).
-    """
-    try:
-        import uvloop  # type: ignore[import-not-found]
-    except ImportError:
-        return False
-    try:
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-        return True
-    except Exception:  # pragma: no cover - uvloop unsupported at runtime
-        return False
 
 
 def _parse_provider_spec(spec: str) -> tuple[str, str, str | None]:
@@ -45,8 +25,7 @@ def _parse_provider_spec(spec: str) -> tuple[str, str, str | None]:
     """
     if ":" not in spec:
         raise ValueError(
-            f"Provider spec {spec!r} must be formatted as "
-            f"'provider:key' or 'provider:key@model'"
+            f"Provider spec {spec!r} must be formatted as 'provider:key' or 'provider:key@model'"
         )
 
     provider_part, key_part = spec.split(":", 1)
@@ -65,12 +44,14 @@ def _build_router_config_from_providers(
     providers = []
     for spec in provider_specs:
         provider_name, key_spec, default_model = _parse_provider_spec(spec)
-        providers.append({
-            "provider": provider_name,
-            "key": key_spec if _looks_like_literal_key(key_spec) else None,
-            "key_env": None if _looks_like_literal_key(key_spec) else key_spec,
-            "model": default_model,
-        })
+        providers.append(
+            {
+                "provider": provider_name,
+                "key": key_spec if _looks_like_literal_key(key_spec) else None,
+                "key_env": None if _looks_like_literal_key(key_spec) else key_spec,
+                "model": default_model,
+            }
+        )
     return RouterConfig.from_providers(providers)
 
 
@@ -78,24 +59,17 @@ def _build_router_config_from_fallback(
     fallback_specs: list[str],
 ) -> RouterConfig:
     """Build a RouterConfig from --fallback specs (cascade)."""
-    # For fallback, we use from_cascade which expects "provider:key" format
-    cascade = []
-    for spec in fallback_specs:
-        provider_name, key_spec, default_model = _parse_provider_spec(spec)
-        cascade.append(f"{provider_name}:{key_spec}")
-
-    # from_cascade returns an LLMRouter, not a RouterConfig
-    # We need to build a config that produces the same cascade
-    # For simplicity, create a RouterConfig with providers in cascade order
     providers = []
     for spec in fallback_specs:
         provider_name, key_spec, default_model = _parse_provider_spec(spec)
-        providers.append({
-            "provider": provider_name,
-            "key": key_spec if _looks_like_literal_key(key_spec) else None,
-            "key_env": None if _looks_like_literal_key(key_spec) else key_spec,
-            "model": default_model,
-        })
+        providers.append(
+            {
+                "provider": provider_name,
+                "key": key_spec if _looks_like_literal_key(key_spec) else None,
+                "key_env": None if _looks_like_literal_key(key_spec) else key_spec,
+                "model": default_model,
+            }
+        )
     return RouterConfig.from_providers(providers)
 
 
@@ -118,95 +92,9 @@ def _resolve_keys(client_cfg: dict[str, Any]) -> list[str]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmrouterx",
-        description="LLMRouter CLI - OpenAI-compatible LLM Gateway",
+        description="LLMRouter CLI - Configuration utilities",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # ============================================================
-    # serve command
-    # ============================================================
-    serve = subparsers.add_parser("serve", help="Start the LLMRouter Gateway server")
-    serve.add_argument("--host", type=str, default="0.0.0.0", help="Host address to bind")
-    serve.add_argument("--port", type=int, default=8000, help="Port to listen on")
-    serve.add_argument("--workers", type=int, default=1, help="Number of worker processes")
-    serve.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to a JSON/YAML router config file (auto-discovers router.yaml/.json if omitted)",
-    )
-    serve.add_argument("--reload", action="store_true", help="Enable auto-reload (development)")
-    serve.add_argument(
-        "--hot-reload",
-        action="store_true",
-        help="Enable hot config reload (implies --reload, single worker only)",
-    )
-    serve.add_argument(
-        "--log-level",
-        type=str,
-        default="info",
-        choices=["debug", "info", "warning", "error", "critical"],
-        help="Logging verbosity",
-    )
-    serve.add_argument(
-        "--log-format",
-        type=str,
-        default="plain",
-        choices=["plain", "json"],
-        help="Log output format (plain text or JSON)",
-    )
-    serve.add_argument(
-        "--admin-token",
-        type=str,
-        default=None,
-        help="Bearer token required on /dashboard and /metrics (also LLMROUTER_ADMIN_TOKEN)",
-    )
-    serve.add_argument(
-        "--api-key",
-        type=str,
-        action="append",
-        default=None,
-        help="Bearer key accepted on /v1/* (repeatable; also LLMROUTER_API_KEYS, comma-separated)",
-    )
-    serve.add_argument(
-        "--no-docs",
-        action="store_true",
-        help="Disable interactive OpenAPI docs (also LLMROUTER_DOCS=0)",
-    )
-    serve.add_argument(
-        "--health-timeout",
-        type=float,
-        default=None,
-        help="Timeout in seconds for /health endpoint provider checks",
-    )
-    serve.add_argument(
-        "--provider",
-        type=str,
-        action="append",
-        default=[],
-        help=(
-            "Quick provider: 'provider:key' or 'provider:key@model' "
-            "(e.g. --provider openai:sk-xxx@gpt-4o). Repeatable."
-        ),
-    )
-    serve.add_argument(
-        "--fallback",
-        type=str,
-        action="append",
-        default=[],
-        help=(
-            "Fallback chain: 'provider:key' or 'provider:key@model' "
-            "(e.g. --fallback openai:sk-1 --fallback groq:sk-2). Repeatable. "
-            "First healthy provider wins."
-        ),
-    )
-    serve.add_argument(
-        "--cors-origin",
-        type=str,
-        action="append",
-        default=[],
-        help="Enable CORS for this origin (repeatable)",
-    )
 
     # ============================================================
     # init command
@@ -271,88 +159,6 @@ def _build_config_from_args(args: argparse.Namespace) -> RouterConfig | None:
     return None
 
 
-def _run_serve(args: argparse.Namespace) -> None:
-    if args.workers and args.workers < 1:
-        print("--workers must be >= 1.", file=sys.stderr)
-        sys.exit(2)
-
-    if args.reload and args.workers and args.workers > 1:
-        print("--reload cannot be combined with --workers > 1.", file=sys.stderr)
-        sys.exit(2)
-
-    if args.hot_reload:
-        if args.workers and args.workers > 1:
-            print("--hot-reload cannot be combined with --workers > 1.", file=sys.stderr)
-            sys.exit(2)
-        args.reload = True  # hot reload implies reload
-
-    try:
-        import uvicorn
-    except ImportError:
-        print("Error: FastAPI or Uvicorn is missing.", file=sys.stderr)
-        print("Please install server extras: pip install llmrouterx[server]", file=sys.stderr)
-        sys.exit(1)
-
-    if _use_uvloop():
-        logging.getLogger("llmrouterx.cli").info("Using uvloop event loop.")
-    else:
-        logging.getLogger("llmrouterx.cli").info("Using the standard asyncio event loop.")
-
-    # Configure logging format
-    from llmrouterx.utils.logging import setup_logging
-    setup_logging(level=args.log_level.upper(), fmt=args.log_format)
-
-    # Build config from --provider/--fallback flags
-    inline_config = _build_config_from_args(args)
-
-    # Determine config path (auto-discover if not provided)
-    config_path = args.config
-    if config_path is None and inline_config is None:
-        # Auto-discover router.yaml or router.json in cwd
-        for name in ("router.yaml", "router.yml", "router.json"):
-            path = Path.cwd() / name
-            if path.exists():
-                config_path = str(path)
-                break
-
-    # Multi-worker mode needs the app factory as an import string, so it cannot
-    # be combined with an inline config or config file. Everything else builds
-    # the app in this process and passes the instance directly to Uvicorn.
-    if inline_config is not None or config_path is not None:
-        if args.workers and args.workers > 1:
-            print(
-                "--workers > 1 requires factory mode and cannot be combined with "
-                "--config, --provider, or --fallback.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-
-        from llmrouterx.server.app import create_app
-
-        app: Any = create_app(
-            config=inline_config,
-            config_path=config_path,
-            admin_token=args.admin_token,
-            api_keys=args.api_key,
-            docs_enabled=not args.no_docs,
-            health_timeout=args.health_timeout,
-            cors_origins=args.cors_origin or None,
-        )
-        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
-        return
-
-    target = "llmrouterx.server.app:create_app"
-    uvicorn.run(
-        target,
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        workers=args.workers,
-        factory=True,
-        log_level=args.log_level,
-    )
-
-
 def _run_init(args: argparse.Namespace) -> None:
     output_path = Path(args.output)
     if output_path.exists() and not args.force:
@@ -366,8 +172,7 @@ def _run_init(args: argparse.Namespace) -> None:
             import yaml
         except ImportError:
             print(
-                "Error: PyYAML is required for YAML output. "
-                "Install with: pip install pyyaml",
+                "Error: PyYAML is required for YAML output. Install with: pip install pyyaml",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -427,13 +232,13 @@ def _get_starter_config() -> dict[str, Any]:
             },
         ],
         # Global settings:
-        "timeout": 60.0,                    # Per-request timeout (seconds)
-        "max_retries": 3,                   # Max retries per request
-        "max_concurrent_per_key": 100,      # Max concurrent requests per API key
-        "max_concurrent_requests": None,    # Global max concurrent (None = unlimited)
-        "total_timeout": None,              # Total timeout across retries (None = unlimited)
-        "enable_circuit_breaker": True,     # Enable circuit breaker
-        "circuit_breaker_threshold": 5,     # Failures before opening circuit
+        "timeout": 60.0,  # Per-request timeout (seconds)
+        "max_retries": 3,  # Max retries per request
+        "max_concurrent_per_key": 100,  # Max concurrent requests per API key
+        "max_concurrent_requests": None,  # Global max concurrent (None = unlimited)
+        "total_timeout": None,  # Total timeout across retries (None = unlimited)
+        "enable_circuit_breaker": True,  # Enable circuit breaker
+        "circuit_breaker_threshold": 5,  # Failures before opening circuit
         "circuit_breaker_reset_timeout": 30.0,  # Seconds before half-open
     }
 
@@ -454,8 +259,7 @@ def _run_config_validate(args: argparse.Namespace) -> None:
             fmt = "json"
         else:
             print(
-                f"Error: Cannot auto-detect format for {file_path}. "
-                f"Use --format.",
+                f"Error: Cannot auto-detect format for {file_path}. Use --format.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -464,6 +268,7 @@ def _run_config_validate(args: argparse.Namespace) -> None:
     try:
         if fmt == "yaml":
             import yaml
+
             content = yaml.safe_load(file_path.read_text())
         else:
             content = json.loads(file_path.read_text())
@@ -494,9 +299,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "serve":
-        _run_serve(args)
-    elif args.command == "init":
+    if args.command == "init":
         _run_init(args)
     elif args.command == "config":
         if args.config_command == "validate":
