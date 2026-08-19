@@ -11,8 +11,11 @@ class JsonFormatter(logging.Formatter):
     """
     Emit log records as single-line JSON objects.
 
-    Extra fields are attached via the ``extra`` keyword argument, for example
-    ``logger.info("routed", extra={"request_id": rid, "provider": "openai"})``.
+    Extra fields are attached via the private ``_llmrouterx_extra`` attribute
+    on the log record, for example the router sets
+    ``record._llmrouterx_extra = {"request_id": rid, "provider": "openai"}
+    `` before logging.  Do not use the standard ``extra`` keyword argument:
+    it is ignored by this formatter.
     """
 
     def format(self, record: logging.LogRecord) -> str:

@@ -118,6 +118,50 @@ def test_validation_error_uses_openai_envelope(client):
     assert body["error"]["type"] == "invalid_request_error"
 
 
+def test_embeddings_endpoint(client):
+    response = client.post(
+        "/v1/embeddings",
+        json={"model": "emb", "input": "hello world"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    assert isinstance(data["data"][0]["embedding"], list)
+
+
+def test_embeddings_endpoint_list_input_uses_first(client):
+    response = client.post(
+        "/v1/embeddings",
+        json={"model": "emb", "input": ["hello", "world"]},
+    )
+    assert response.status_code == 200
+
+
+def test_rerank_endpoint(client):
+    response = client.post(
+        "/v1/rerank",
+        json={
+            "model": "rerank-v3",
+            "query": "What is the capital of France?",
+            "documents": ["Brasilia is the capital.", "Paris is the capital."],
+            "top_n": 1,
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["results"]) == 1
+    assert data["results"][0]["index"] == 0
+    assert 0.0 <= data["results"][0]["relevance_score"] <= 1.0
+
+
+def test_rerank_endpoint_empty_documents_rejected(client):
+    response = client.post(
+        "/v1/rerank",
+        json={"model": "m", "query": "q", "documents": []},
+    )
+    assert response.status_code == 422
+
+
 def test_chat_completions_returns_503_when_no_healthy_provider():
     class Broken:
         async def chat(self, prompt, **kwargs):

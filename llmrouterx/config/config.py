@@ -5,7 +5,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from .secrets import resolve_key
+try:
+    import yaml
+except ImportError:  # pragma: no cover - yaml is optional
+    yaml = None
 
 
 def _parse_bool(value: Any, default: bool = True) -> bool:
@@ -86,14 +89,23 @@ class RouterConfig:
         """Return a copy with every client's API key materialised.
 
         Each client dict's ``api_key``/``api_key_env``/``api_key_file`` source
-        is replaced with the resolved literal key under ``api_key``.
+        is replaced with the resolved literal key under ``api_key``. When
+        ``api_key_env`` names a key prefix (e.g. ``OPEN_AI_KEY``) and key-name
+        scanning is enabled, every numbered variant found in the environment
+        (``OPEN_AI_KEY_1``, ``OPEN_AI_KEY_2``, ...) expands the client dict
+        into one client per key, so each becomes its own ClientNode and the
+        provider rotates across them.
         """
+        from .secrets import resolve_keys
+
         clean: list[Any] = []
         for provider in self.providers:
             resolved_provider = dict(provider)
-            resolved_provider["clients"] = [
-                {**client, "api_key": resolve_key(client)} for client in provider.get("clients", [])
-            ]
+            expanded: list[Any] = []
+            for client in provider.get("clients", []):
+                for key in resolve_keys(client):
+                    expanded.append({**client, "api_key": key})
+            resolved_provider["clients"] = expanded
             clean.append(resolved_provider)
         return self.copy(providers=clean)
 
@@ -146,13 +158,114 @@ class RouterConfig:
         return cfg.resolve_keys()
 
     @classmethod
+    def _from_dict_no_resolve(cls, data: dict[str, Any]) -> RouterConfig:
+        """Build a config from a dict without resolving API keys (for validation)."""
+        known = {
+            "providers",
+            "timeout",
+            "max_retries",
+            "max_concurrent_per_key",
+            "max_concurrent_requests",
+            "total_timeout",
+            "enable_circuit_breaker",
+            "circuit_breaker_threshold",
+            "circuit_breaker_reset_timeout",
+        }
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"Unknown config keys: {sorted(unknown)}")
+        cfg = cls(
+            providers=list(data.get("providers", [])),
+            timeout=float(data.get("timeout", 60.0)),
+            max_retries=int(data.get("max_retries", 3)),
+            max_concurrent_per_key=int(data.get("max_concurrent_per_key", 100)),
+            max_concurrent_requests=(
+                int(data["max_concurrent_requests"])
+                if data.get("max_concurrent_requests")
+                else None
+            ),
+            total_timeout=(float(data["total_timeout"]) if data.get("total_timeout") else None),
+            enable_circuit_breaker=_parse_bool(data.get("enable_circuit_breaker", True)),
+            circuit_breaker_threshold=int(data.get("circuit_breaker_threshold", 5)),
+            circuit_breaker_reset_timeout=float(data.get("circuit_breaker_reset_timeout", 30.0)),
+        )
+        return cfg
+
+    @classmethod
     def from_file(cls, path: str | os.PathLike[str]) -> RouterConfig:
-        """Load a config from a JSON file."""
+        """Load a config from a JSON or YAML file."""
+        path = os.fspath(path)
         with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
+            if path.endswith((".yaml", ".yml")):
+                if yaml is None:
+                    raise ImportError(
+                        "PyYAML is required for YAML config files. "
+                        "Install with: pip install pyyaml"
+                    )
+                data = yaml.safe_load(handle)
+            else:
+                data = json.load(handle)
         if not isinstance(data, dict):
-            raise ValueError("Config file must contain a JSON object.")
+            raise ValueError("Config file must contain a JSON/YAML object.")
         return cls.from_dict(data)
+
+    @classmethod
+    def from_providers(cls, providers: list[dict[str, Any]]) -> RouterConfig:
+        """Build a config from the ergonomic provider format.
+
+        Each provider dict accepts:
+        - provider (required): adapter name (openai, groq, anthropic, etc.)
+        - key: literal API key
+        - key_env: environment variable name (scans for numbered variants)
+        - key_file: path to key file
+        - model: default chat model
+        - embedding_model: default embedding model
+        - base_url: optional OpenAI-compatible base URL
+        - scheduler: scheduler instance for key rotation
+        - clients: list of client dicts (for multiple keys with per-key options)
+        """
+        internal_providers = []
+        for p in providers:
+            if "provider" not in p:
+                raise ValueError("Each provider must have a 'provider' field")
+
+            provider_name = p["provider"]
+            clients = []
+
+            # Handle inline client(s)
+            if "clients" in p:
+                # Explicit clients list provided
+                for c in p["clients"]:
+                    client_dict = dict(c)
+                    client_dict.setdefault("client", provider_name)
+                    clients.append(client_dict)
+            else:
+                # Build single client from provider fields
+                client_dict: dict[str, Any] = {"client": provider_name}
+                if p.get("key"):
+                    client_dict["api_key"] = p["key"]
+                if p.get("key_env"):
+                    client_dict["api_key_env"] = p["key_env"]
+                if p.get("key_file"):
+                    client_dict["api_key_file"] = p["key_file"]
+                if p.get("model"):
+                    client_dict["default_model"] = p["model"]
+                if p.get("embedding_model"):
+                    client_dict["embedding_model"] = p["embedding_model"]
+                if p.get("base_url"):
+                    client_dict["base_url"] = p["base_url"]
+                clients.append(client_dict)
+
+            provider_dict: dict[str, Any] = {
+                "name": provider_name,
+                "clients": clients,
+            }
+            if "scheduler" in p and p["scheduler"] is not None:
+                provider_dict["scheduler"] = p["scheduler"]
+
+            internal_providers.append(provider_dict)
+
+        return cls(providers=internal_providers)
 
     def validate(self) -> None:
         if not self.providers:

@@ -4,6 +4,7 @@ import logging
 import random
 from typing import TYPE_CHECKING, Any
 
+from ..exceptions import ConfigurationError
 from .base import BaseScheduler
 
 if TYPE_CHECKING:
@@ -21,7 +22,14 @@ class WeightedScheduler(BaseScheduler):
         for c in clients:
             try:
                 if await c.is_healthy() and not getattr(c, "is_saturated", False):
-                    w = getattr(c, "weight", 1) or 1
+                    w = getattr(c, "weight", 1)
+                    if w < 0:
+                        raise ConfigurationError(
+                            f"Negative weight {w} for client {c}"
+                        )
+                    if w == 0:
+                        # Zero-weight clients are excluded from selection.
+                        continue
                     weighted.append((c, float(w)))
             except (AttributeError, RuntimeError, OSError, TypeError) as e:
                 logging.debug("weighted scheduler: skipping client due to error: %s", e)
@@ -29,6 +37,8 @@ class WeightedScheduler(BaseScheduler):
         if not weighted:
             return None
         total = sum(w for _, w in weighted)
+        if total <= 0:
+            return None
         r = random.random() * total
         upto = 0.0
         for c, w in weighted:

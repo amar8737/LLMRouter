@@ -6,6 +6,7 @@ from ..exceptions import ConfigurationError
 from .anthropic import AnthropicAdapter
 from .azure import AzureOpenAIAdapter
 from .base import BaseProviderAdapter
+from .cohere import CohereAdapter
 from .gemini import GeminiAdapter
 from .groq import GroqAdapter
 from .mistral import MistralAdapter
@@ -25,6 +26,7 @@ class AdapterFactory:
 
     _ADAPTERS: ClassVar[dict[str, type[BaseProviderAdapter]]] = {
         "openai": OpenAIAdapter,
+        "cohere": CohereAdapter,
         "azure": AzureOpenAIAdapter,
         "azure_openai": AzureOpenAIAdapter,
         "nim": NIMAdapter,
@@ -98,8 +100,13 @@ class AdapterFactory:
             )
 
         # Already an adapter: pass it straight through so that callers may
-        # supply hand-built or third-party adapters.
+        # supply hand-built or third-party adapters. Defaults requested here
+        # still apply when the adapter has none of its own.
         if isinstance(client, BaseProviderAdapter):
+            if default_model is not None and client.default_model is None:
+                client._default_model = default_model
+            if embedding_model is not None and client.embedding_model is None:
+                client._embedding_model = embedding_model
             return client
 
         try:

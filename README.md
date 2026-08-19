@@ -13,9 +13,9 @@ LLMRouter is a Python package that acts as a routing layer between your applicat
 client = OpenAI(api_key="sk-...")
 response = client.chat.completions.create(model="gpt-4", messages=[...])
 
-# Use LLMRouter for intelligent routing:
-router = LLMRouter(providers=[openai_provider, groq_provider])
-response = await router.chat(prompt="Hello!")
+# Use LLMRouter for intelligent routing (sync or async):
+router = LLMRouterSync.from_cascade(["openai:OPEN_AI_KEY"])
+response = router.chat("Hello!")
 # Router automatically picks the best provider, rotates keys, retries on failure, tracks metrics
 ```
 
@@ -40,18 +40,42 @@ response = await router.chat(prompt="Hello!")
 - 🛡️ **Error Handling** — Graceful degradation with meaningful exceptions
 - 🔐 **Gateway Auth** — optional bearer-token tiers (admin for `/dashboard`+`/metrics`, API key for `/v1/*`) via `create_app(..., admin_token=, api_keys=)` or env/CLI
 - 🖥️ **HTTP Gateway** — OpenAI-compatible server (`/v1/chat/completions`, streaming, health, metrics, dashboard)
-- 📄 **Declarative Config** — JSON config files with env/file-based key loading (`api_key_env` / `api_key_file`)
+- 📄 **Declarative Config** — **YAML/JSON** config files with env/file-based key loading (`api_key_env` / `api_key_file`)
 - 🔭 **Langfuse Tracing** — Zero-code observability via middleware
 - 📊 **Dashboard & Token Tracking** — zero-config UI plus global/per-provider token counters
 - 🛠️ **Actionable Errors** — `NoHealthyClientError` reports the full `Failure sequence` across providers
+- ⚡ **Zero-Config CLI** — `--provider`, `--fallback`, `--init`, `config validate` for instant setup
+- 🔥 **Hot Config Reload** — Dev-mode watcher rebuilds router on config change
+- 📈 **Prometheus Metrics** — `/metrics/prometheus` endpoint for standard monitoring
+- ☸️ **K8s Probes** — `/live` (liveness) and `/ready` (readiness) endpoints
+- 🆔 **Request ID Propagation** — `X-Request-ID` header echoed through logs and responses
 
-### Planned Features (v0.2+)
-- 💰 Cost-aware routing (pick cheapest provider)
-- ⚡ Latency-aware routing (pick fastest provider)
-- 🌍 Region-aware routing
-- 💾 Response caching
-- 🔐 Authentication gateway
-- 📉 Prometheus metrics export
+---
+
+## 🧭 Endpoint Coverage
+
+Every operation routes through the same failover/retry/circuit-breaker pipeline.
+
+| Endpoint | `LLMRouter` (async) | `LLMRouterSync` | HTTP Gateway | Providers |
+|---|---|---|---|---|
+| Chat | `await router.chat(prompt)` | `router.chat(prompt)` | `POST /v1/chat/completions` | all |
+| Stream | `async for t in router.stream(...)` | `router.stream_chunks(...)` / `router.stream(...)` | same route, `stream: true` | all |
+| Embeddings | `await router.embeddings(text)` | `router.embeddings(text)` | `POST /v1/embeddings` | all |
+| Rerank | `await router.rerank(query, documents)` | `router.rerank(query, documents)` | `POST /v1/rerank` | Jina, Voyage, vLLM-style servers, Cohere |
+| Responses API | `await router.responses(...)` | `router.responses(...)` | — | OpenAI |
+| Health | `await router.health()` | `router.health()` | `GET /health` | all |
+| Metrics | `router.get_metrics()` | `router.get_metrics()` | `GET /metrics` | all |
+
+Rerank returns `[{index, relevance_score}, ...]` sorted by score descending,
+where `index` is the position of the document in the input list:
+
+```python
+results = router.rerank(
+    "What is the capital of France?",
+    ["Brazil's capital is Brasilia.", "France's capital is Paris."],
+)
+# [{"index": 1, "relevance_score": 0.95}, {"index": 0, "relevance_score": 0.12}]
+```
 
 ---
 
@@ -60,6 +84,14 @@ response = await router.chat(prompt="Hello!")
 ### From PyPI
 ```bash
 pip install llmrouterx
+```
+
+### With Extras
+```bash
+pip install llmrouterx[server]      # HTTP gateway (FastAPI, Uvicorn, YAML, Prometheus, hot-reload, Jinja2)
+pip install llmrouterx[langfuse]    # Langfuse tracing
+pip install llmrouterx[openai]      # OpenAI SDK (for type hints)
+pip install llmrouterx[server,langfuse]  # Combined
 ```
 
 ### From Source (Development)
@@ -81,46 +113,65 @@ pip install -e .
 
 ### 1. Install the package
 ```bash
-pip install llmrouterx
+pip install llmrouterx[openai]
 ```
 
-### 2. Basic example with OpenAI
+### 2. Set your API keys
+```bash
+export OPEN_AI_KEY=sk-...
+# Optionally add more keys for rotation:
+export OPEN_AI_KEY_1=sk-...
+export OPEN_AI_KEY_2=sk-...
+```
+
+The router scans key *names*: give it `OPEN_AI_KEY` and it picks up
+`OPEN_AI_KEY`, `OPEN_AI_KEY_1`, `OPEN_AI_KEY_2`, ... automatically, stopping at
+the first gap — each found key becomes a rotating client.
+
+### 3. Zero-Config Server (No Config File Needed)
+
+```bash
+pip install llmrouterx[server]
+
+# Single provider
+llmrouterx serve --provider openai:sk-...@gpt-4o --port 8000
+
+# Fallback chain (first healthy wins)
+llmrouterx serve --fallback openai:sk-1 --fallback groq:gsk-2 --port 8000
+
+# Auto-discovers router.yaml / router.json in cwd
+llmrouterx serve --port 8000
+```
+
+### 4. Use the synchronous API
 ```python
-import asyncio
-from openai import AsyncOpenAI
-from llmrouterx import LLMRouter
-from llmrouterx.adapters import AdapterFactory
-from llmrouterx.client import ClientNode
-from llmrouterx.providers import ProviderRouter, CompositeRouter
+from llmrouterx import LLMRouterSync
 
+router = LLMRouterSync.from_cascade(["openai:OPEN_AI_KEY"])
 
-async def main():
-    # Create an OpenAI client and wrap it in the OpenAI adapter
-    sdk_client = AsyncOpenAI(api_key="sk-your-key-here")
-    adapter = AdapterFactory.create(provider="openai", client=sdk_client, default_model="gpt-4")
-
-    # Wrap it in a ClientNode (tracks identity and health)
-    node = ClientNode("sk-your-key-here", adapter)
-
-    # Create a provider (represents a service like OpenAI)
-    provider = ProviderRouter("openai", [node])
-
-    # Create a composite router (aggregates providers)
-    composite = CompositeRouter([provider])
-
-    # Create the router
-    router = LLMRouter(composite)
-
-    # Make a request
-    response = await router.chat(prompt="Hello, what's 2+2?")
-    print(response)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+response = router.chat("Hello, what's 2+2?")
+print(response)
 ```
 
-### 3. Run tests to verify installation
+That's it — no manual client wiring. Prefer async? The exact same setup works
+with `LLMRouter` + `await router.chat(...)`.
+
+### 5. Multiple providers with automatic failover
+```python
+from llmrouterx import LLMRouterSync
+
+router = LLMRouterSync.from_providers(
+    [
+        {"provider": "openai", "key_env": "OPEN_AI_KEY", "model": "gpt-4o"},
+        {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b"},
+    ]
+)
+
+# OpenAI fails -> automatically falls back to Groq
+print(router.chat("Hello!"))
+```
+
+### 6. Run tests to verify installation
 ```bash
 pip install pytest pytest-asyncio
 pytest tests/ -v
@@ -778,26 +829,54 @@ export LLMROUTER_ADMIN_TOKEN=admin-secret       # protects /dashboard, /metrics
 export LLMROUTER_API_KEYS=sk-openai-1,gsk-groq-1  # protects /v1/*
 export LLMROUTER_DOCS=0                         # hide /docs, /redoc
 
-llmrouterx serve --config router.json --no-docs --port 8000
+# Quick start (no config file)
+llmrouterx serve --provider openai:sk-...@gpt-4o --port 8000
+
+# Fallback chain
+llmrouterx serve --fallback openai:sk-1 --fallback groq:gsk-2 --port 8000
+
+# With config file (YAML or JSON) - auto-discovers router.yaml/.json in cwd
+llmrouterx serve --config router.yaml --port 8000
+
+# Generate a starter config
+llmrouterx init --format yaml -o router.yaml
+
+# Validate a config file
+llmrouterx config validate router.yaml
+
+# Dev mode with hot reload and JSON logs
+llmrouterx serve --config router.yaml --hot-reload --log-format json
 ```
 
 `LLMROUTER_API_KEYS` is comma-separated; each value is accepted as a bearer
 token on `/v1/models` and `/v1/chat/completions`. Omitting these vars leaves
 the gateway open (useful for local dev only). See [docs/SERVER.md](docs/SERVER.md).
 
-### Loading Config from a JSON File
+### Loading Config from a JSON or YAML File
 
-Configs can be written as JSON and loaded with `RouterConfig.from_file` /
+Configs can be written as **YAML or JSON** and loaded with `RouterConfig.from_file` /
 `from_dict`. Keys are resolved automatically (see below).
 
 ```python
 from llmrouterx.config import RouterConfig
 from llmrouterx.router.factory import RouterFactory
 
-config = RouterConfig.from_file("router.json")  # resolves keys automatically
+config = RouterConfig.from_file("router.yaml")  # resolves keys automatically
 router = RouterFactory.build(config)
 ```
 
+**YAML** (recommended):
+```yaml
+# router.yaml
+providers:
+  - name: openai
+    clients:
+      - client: openai
+        api_key_env: OPENAI_API_KEY
+        default_model: gpt-4o
+```
+
+**JSON**:
 ```json
 {
   "providers": [
@@ -812,6 +891,37 @@ router = RouterFactory.build(config)
   "total_timeout": 30.0
 }
 ```
+
+### Ergonomic Provider Format (Recommended)
+
+Use `RouterConfig.from_providers()` for a cleaner, type-safe config:
+
+```python
+from llmrouterx.config import RouterConfig
+
+config = RouterConfig.from_providers([
+    {"provider": "openai", "key_env": "OPENAI_API_KEY", "model": "gpt-4o"},
+    {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b"},
+])
+
+from llmrouterx.router.factory import RouterFactory
+router = RouterFactory.build(config)
+```
+
+Or declaratively in YAML:
+```yaml
+# router.yaml
+providers:
+  - provider: openai
+    key_env: OPENAI_API_KEY
+    model: gpt-4o
+  - provider: groq
+    key_env: GROQ_API_KEY
+    model: llama-3.3-70b
+```
+
+The ergonomic format auto-detects SDK clients and handles key rotation via `key_env`
+scanning (`OPEN_AI_KEY` → `OPEN_AI_KEY_1`, `OPEN_AI_KEY_2`, ...).
 
 ### Loading API Keys
 
@@ -1073,12 +1183,21 @@ Built with ❤️ for developers managing multiple LLM providers. Special thanks
 - Streaming + graceful shutdown
 - Total request timeouts
 - Retry middleware hook, labeled metrics, structured logging
+- **Zero-config CLI (`--provider`, `--fallback`, `--init`, `config validate`)**
+- **YAML + JSON config support with auto-discovery**
+- **Ergonomic provider format (`from_providers`)**
+- **Hot config reload (dev mode)**
+- **Prometheus metrics export (`/metrics/prometheus`)**
+- **Kubernetes liveness/readiness probes (`/live`, `/ready`)**
+- **Request ID propagation (`X-Request-ID`)**
 
 **v0.2** (Planned)
 - Cost-aware routing
 - Latency-aware routing
 - Response caching
-- Prometheus metrics export
+- **Auto-detect provider from key prefix (`sk-`→OpenAI, `gsk-`→Groq, etc.)**
+- **ServerConfig dataclass for cleaner `create_app()`**
+- **Enhanced dashboard with provider drill-down & trace view**
 
 **v0.3** (Future)
 - Region-aware routing

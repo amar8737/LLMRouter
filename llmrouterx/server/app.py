@@ -71,6 +71,51 @@ class ChatCompletionResponse(BaseModel):
     choices: list[CompletionChoice]
 
 
+def _resolve_model(model: str) -> str | None:
+    """Resolve the special 'default' model string to None (adapter default)."""
+    return None if model == "default" else model
+
+
+class EmbeddingRequest(BaseModel):
+    model: str = "default"
+    input: str | list[str]
+
+
+class EmbeddingData(BaseModel):
+    object: Literal["embedding"] = "embedding"
+    embedding: list[float]
+    index: int = 0
+
+
+class EmbeddingUsage(BaseModel):
+    prompt_tokens: int = 0
+    total_tokens: int = 0
+
+
+class EmbeddingResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[EmbeddingData]
+    model: str
+    usage: EmbeddingUsage = EmbeddingUsage()
+
+
+class RerankRequest(BaseModel):
+    model: str = "default"
+    query: str
+    documents: list[str] = Field(default_factory=list, min_length=1)
+    top_n: int | None = Field(default=None, gt=0)
+
+
+class RerankResult(BaseModel):
+    index: int
+    relevance_score: float
+
+
+class RerankResponse(BaseModel):
+    model: str
+    results: list[RerankResult]
+
+
 class ModelEntry(BaseModel):
     id: str
     object: Literal["model"] = "model"
@@ -158,6 +203,17 @@ def _coerce_text(result: Any) -> str:
     if isinstance(result, dict):
         return str(result.get("response", result))
     return str(result)
+
+
+def _coerce_embedding(result: Any) -> list[float]:
+    """Normalize a provider embedding result to ``list[float]``.
+
+    Real adapters return ``list[float]``; test stubs may return
+    ``{"embedding": [...]}`` or a numpy-like array.
+    """
+    if isinstance(result, dict):
+        result = result.get("embedding", [])
+    return [float(v) for v in result]
 
 
 def _error_payload(
@@ -461,7 +517,7 @@ def create_app(
     @app.get("/dashboard", response_class=HTMLResponse, dependencies=[Depends(admin_guard)])
     async def dashboard(request: Request) -> HTMLResponse:
         """Zero-config observability dashboard (auto-refreshing)."""
-        html_content = _DASHBOARD_HTML.replace("__ADMIN_TOKEN__", admin_token or "")
+        html_content = _DASHBOARD_HTML
         return HTMLResponse(content=html_content)
 
     @app.get("/metrics", dependencies=[Depends(admin_guard)])
@@ -515,11 +571,13 @@ def create_app(
     @app.post(
         "/admin/api-keys", response_model=APIKeyCreateResponse, dependencies=[Depends(admin_guard)]
     )
-    async def create_api_key_endpoint(request: Request) -> APIKeyCreateResponse:
+    async def create_api_key_endpoint(
+        body: APIKeyCreateRequest,
+        request: Request,
+    ) -> APIKeyCreateResponse:
         """Create a new API key (admin only)."""
-        body = await request.json()
         # Validate scopes
-        for scope in body.get("scopes", ["chat", "embeddings"]):
+        for scope in body.scopes:
             if scope not in VALID_SCOPES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -527,9 +585,9 @@ def create_app(
                 )
 
         full_key, record = create_api_key(
-            name=body["name"],
-            scopes=tuple(body.get("scopes", ["chat", "embeddings"])),
-            expires_in=body.get("expires_in"),
+            name=body.name,
+            scopes=tuple(body.scopes),
+            expires_in=body.expires_in,
         )
 
         return APIKeyCreateResponse(
@@ -584,7 +642,9 @@ def create_app(
 
             async def sse_generator() -> AsyncGenerator[str, None]:
                 try:
-                    async for chunk in rt.stream(prompt=prompt, model=req.model, **kwargs):
+                    async for chunk in rt.stream(
+                        prompt=prompt, model=_resolve_model(req.model), **kwargs
+                    ):
                         yield _sse_chunk(_coerce_text(chunk), request_id, created)
                 except NoHealthyClientError as exc:
                     yield _sse_error(str(exc), error_type="server_error", code="503")
@@ -608,7 +668,9 @@ def create_app(
             return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
         try:
-            text = _coerce_text(await rt.chat(prompt=prompt, model=req.model, **kwargs))
+            text = _coerce_text(
+                        await rt.chat(prompt=prompt, model=_resolve_model(req.model), **kwargs)
+                    )
         except NoHealthyClientError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
@@ -620,6 +682,59 @@ def create_app(
             created=int(time.time()),
             model=req.model,
             choices=[CompletionChoice(message=ChatMessage(role="assistant", content=text))],
+        )
+
+    @app.post("/v1/embeddings", dependencies=[Depends(api_key_guard)])
+    async def embeddings_endpoint(req: EmbeddingRequest, request: Request) -> Any:
+        rt: LLMRouter = request.app.state.llm_router
+        text = req.input[0] if isinstance(req.input, list) else req.input
+        if not isinstance(text, str) or not text:
+            raise HTTPException(
+                status_code=400,
+                detail="input must be a non-empty string (list input is not supported yet)",
+            )
+
+        try:
+            embedding = _coerce_embedding(
+                        await rt.embeddings(text=text, model=_resolve_model(req.model))
+                    )
+        except NoHealthyClientError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Error serving embeddings request")
+            raise HTTPException(status_code=500, detail="Internal Router Error") from exc
+
+        return EmbeddingResponse(
+            data=[EmbeddingData(embedding=embedding)],
+            model=req.model,
+        )
+
+    @app.post("/v1/rerank", dependencies=[Depends(api_key_guard)])
+    async def rerank_endpoint(req: RerankRequest, request: Request) -> Any:
+        rt: LLMRouter = request.app.state.llm_router
+        if not req.documents:
+            raise HTTPException(status_code=400, detail="documents must not be empty")
+
+        kwargs: dict[str, Any] = {}
+        if req.top_n is not None:
+            kwargs["top_n"] = req.top_n
+
+        try:
+            results = await rt.rerank(
+                    query=req.query,
+                    documents=req.documents,
+                    model=_resolve_model(req.model),
+                    **kwargs,
+                )
+        except NoHealthyClientError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Error serving rerank request")
+            raise HTTPException(status_code=500, detail="Internal Router Error") from exc
+
+        return RerankResponse(
+            model=req.model,
+            results=[RerankResult(**item) for item in results],
         )
 
     return app

@@ -86,7 +86,10 @@ class ProviderRouter:
                     raise
 
                 except NoHealthyClientError:
-                    raise
+                    # Scheduler returned no healthy client; fall through to
+                    # the linear scan so a bad scheduler pick cannot starve
+                    # a provider that still has working clients.
+                    pass
 
                 except Exception as exc:
                     last_exception = exc
@@ -153,11 +156,11 @@ class ProviderRouter:
         a mid-stream failure is surfaced to the caller instead of re-routing.
         """
         for client in self.clients:
+            started = False
             try:
                 if not await client.is_healthy():
                     continue
 
-                started = False
                 async for token in client.stream(prompt, **kwargs):
                     started = True
                     yield token

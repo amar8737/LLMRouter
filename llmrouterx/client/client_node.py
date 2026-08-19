@@ -38,7 +38,7 @@ class ClientNode:
     FAILURE_THRESHOLD = 5
     COOLDOWN_SECONDS = 30.0
 
-    SUPPORTED_OPERATIONS = ("chat", "embeddings", "responses")
+    SUPPORTED_OPERATIONS = ("chat", "embeddings", "responses", "rerank")
 
     def __init__(
         self,
@@ -298,7 +298,7 @@ class ClientNode:
     @staticmethod
     def _merge(
         payload: dict[str, Any],
-        exclude: str,
+        exclude: str | tuple[str, ...],
         kwargs: dict[str, Any],
     ) -> dict[str, Any]:
         """
@@ -307,7 +307,8 @@ class ClientNode:
         Explicit ``kwargs`` win over payload entries so an override never
         raises ``TypeError: got multiple values for keyword argument``.
         """
-        merged = {k: v for k, v in payload.items() if k != exclude}
+        excluded = {exclude} if isinstance(exclude, str) else set(exclude)
+        merged = {k: v for k, v in payload.items() if k not in excluded}
         merged.update(kwargs)
         return merged
 
@@ -343,6 +344,19 @@ class ClientNode:
             return self.client.responses(
                 *payload.get("args", ()),
                 **self._merge(payload, "args", kwargs),
+                context=context,
+            )
+
+        if op == "rerank":
+            if "query" not in payload:
+                raise ValueError("The 'rerank' operation requires a 'query' field.")
+            if not payload.get("documents"):
+                raise ValueError("The 'rerank' operation requires a 'documents' field.")
+
+            return self.client.rerank(
+                payload["query"],
+                payload["documents"],
+                **self._merge(payload, ("query", "documents"), kwargs),
                 context=context,
             )
 

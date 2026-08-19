@@ -230,6 +230,62 @@ class BaseProviderAdapter(ABC):
             f"{self.__class__.__name__} does not implement the Responses API."
         )
 
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        model: str | None = None,
+        context: RequestContext | None = None,
+        top_n: int | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        Optional reranking endpoint.
+
+        Takes a ``query`` and a list of ``documents`` and returns the documents
+        re-ordered by relevance, normalized to a list of dicts::
+
+            [
+                {"index": 3, "relevance_score": 0.91},
+                {"index": 0, "relevance_score": 0.44},
+                ...
+            ]
+
+        sorted by ``relevance_score`` descending. ``index`` refers to the
+        position of the document in the input list. ``top_n`` limits the
+        number of results returned. Override in adapters whose provider
+        exposes a rerank endpoint (Jina, Voyage, vLLM-style servers, Cohere);
+        providers without one raise ``NotImplementedError``.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement reranking.")
+
+    @staticmethod
+    def _normalize_rerank(
+        results: list[Any],
+        *,
+        index_field: str = "index",
+        score_field: str = "relevance_score",
+    ) -> list[dict[str, Any]]:
+        """
+        Normalize provider rerank results into ``[{index, relevance_score}]``
+        sorted by score descending.
+        """
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                if hasattr(item, "model_dump"):
+                    item = item.model_dump()
+                else:
+                    item = {key: getattr(item, key) for key in dir(item) if not key.startswith("_")}
+            index = item.get(index_field)
+            score = item.get(score_field)
+            if index is None or score is None:
+                continue
+            normalized.append({"index": int(index), "relevance_score": float(score)})
+        normalized.sort(key=lambda r: r["relevance_score"], reverse=True)
+        return normalized
+
     async def health_check(self) -> bool:
         """
         Lightweight health check.

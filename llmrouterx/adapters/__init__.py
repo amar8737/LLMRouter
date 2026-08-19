@@ -1,6 +1,7 @@
 from .anthropic import AnthropicAdapter
 from .azure import AzureOpenAIAdapter
 from .base import BaseProviderAdapter
+from .cohere import CohereAdapter
 from .factory import AdapterFactory
 from .gemini import GeminiAdapter
 from .groq import GroqAdapter
@@ -15,6 +16,7 @@ __all__ = [
     "AnthropicAdapter",
     "AzureOpenAIAdapter",
     "BaseProviderAdapter",
+    "CohereAdapter",
     "GeminiAdapter",
     "GroqAdapter",
     "MistralAdapter",

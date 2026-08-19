@@ -84,7 +84,11 @@ class LangfuseMiddleware(BaseMiddleware):
             observation = cm.__enter__()
             context.set(_STATE_KEY, (cm, observation, time.perf_counter()))
         except Exception:  # pragma: no cover - tracing must never break routing
-            logger.exception("Langfuse failed to start observation; disabling tracing.")
+            self._client = None
+            logger.warning(
+                "Langfuse tracing disabled (client unavailable); "
+                "will not add observations for this request."
+            )
 
     def _end(
         self,
@@ -120,11 +124,8 @@ class LangfuseMiddleware(BaseMiddleware):
             }
             observation.update(**update)
             observation.end()
-            cm.__exit__(None, None, None)
-        except Exception:  # pragma: no cover
-            logger.exception("Langfuse failed to end observation.")
         finally:
-            context.set(_STATE_KEY, None)
+            cm.__exit__(None, None, None)
 
     # ------------------------------------------------------------------
     # BaseMiddleware hooks
@@ -162,15 +163,6 @@ class LangfuseMiddleware(BaseMiddleware):
             status_message=f"{type(exception).__name__}: {exception}",
         )
 
-    async def on_retry(
-        self,
-        operation: str,
-        payload: dict[str, Any],
-        exception: BaseException,
-        attempt: int,
-        context: RequestContext,
-    ) -> bool:
-        return True
 
     def flush(self) -> None:
         """Flush pending traces (call on application shutdown)."""

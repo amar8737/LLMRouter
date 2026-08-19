@@ -37,6 +37,7 @@ dev = [
 ]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
+cohere = ["cohere>=5.0"]
 langfuse = ["langfuse>=3.0"]
 server = [
 	"fastapi>=0.100.0",

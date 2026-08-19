@@ -165,6 +165,51 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         # Normalize to the same ``str`` contract as ``chat``.
         return self._extract_text(response)
 
+    @translate_async_errors
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        model: str | None = None,
+        context: RequestContext | None = None,
+        top_n: int | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+
+        client = self.client
+        rerank_api = getattr(client, "rerank", None)
+        if rerank_api is None:
+            return await super().rerank(
+                query,
+                documents,
+                model=model,
+                context=context,
+                top_n=top_n,
+                **kwargs,
+            )
+
+        params: dict[str, Any] = {
+            "model": model or self.default_model,
+            "query": query,
+            "documents": documents,
+            **kwargs,
+        }
+        if top_n is not None:
+            params["top_n"] = top_n
+
+        response = await rerank_api.create(**params)
+
+        self._record_usage(context, response)
+
+        results = getattr(response, "results", None)
+        if results is None:
+            results = getattr(response, "data", None)
+        if not results:
+            raise HTTPError(502, "Provider returned no rerank results.")
+
+        return self._normalize_rerank(results)
+
     async def health_check(self) -> bool:
 
         try:

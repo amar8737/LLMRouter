@@ -150,10 +150,11 @@ class CircuitBreaker:
                     self._failure_count = 0
                     self._state = CircuitState.CLOSED
                     self._half_open_calls = 0
+                    successes = self._half_open_successes
                     self._half_open_successes = 0
                     logger.info(
                         "Circuit breaker recovered to CLOSED after %d successful trial(s)",
-                        self._half_open_successes,
+                        successes,
                     )
                 else:
                     self._failure_count = int(
@@ -163,10 +164,11 @@ class CircuitBreaker:
                         self._failure_count = 0
                         self._state = CircuitState.CLOSED
                         self._half_open_calls = 0
+                        successes = self._half_open_successes
                         self._half_open_successes = 0
                         logger.info(
                             "Circuit breaker recovered to CLOSED after %d successful trial(s)",
-                            self._half_open_successes,
+                            successes,
                         )
                 return
 

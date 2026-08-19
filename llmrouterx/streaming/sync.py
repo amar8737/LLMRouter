@@ -164,7 +164,7 @@ class SyncStreamEngine:
         finally:
             if not future.done():
                 future.cancel()
-            future.result(timeout=0)
+            future.result()
 
         if error[0]:
             raise error[0]

@@ -28,6 +28,12 @@ class StubClient:
             "response": f"Responses from {self.name}",
         }
 
+    async def rerank(self, query: str, documents: list, **kwargs):
+        await asyncio.sleep(0)
+        ranked = [{"index": i, "relevance_score": 1.0 - i * 0.1} for i in range(len(documents))]
+        top_n = kwargs.get("top_n")
+        return ranked[:top_n] if top_n else ranked
+
     async def stream(self, prompt: str, **kwargs):
         await asyncio.sleep(0)
         for part in prompt.split():

@@ -22,12 +22,14 @@ class MetricsCollector:
         *,
         max_samples: int = 1000,
         max_counter_keys: int = 500,
+        max_timing_keys: int = 500,
     ) -> None:
 
         self._lock = Lock()
 
         self._max_samples = max_samples
         self._max_counter_keys = max_counter_keys
+        self._max_timing_keys = max_timing_keys
 
         self._counters: dict[str, int] = {}
 
@@ -88,6 +90,15 @@ class MetricsCollector:
     ) -> None:
 
         with self._lock:
+            if key not in self._timings:
+                if len(self._timings) >= self._max_timing_keys:
+                    oldest = next(iter(self._timings))
+                    self._timings.pop(oldest)
+                    self._labeled_timings.pop(oldest, None)
+                self._timings[key] = deque(maxlen=self._max_samples)
+                self._labeled_timings[key] = defaultdict(
+                    lambda: deque(maxlen=self._max_samples)
+                )
             self._timings[key].append(seconds)
 
             if labels:

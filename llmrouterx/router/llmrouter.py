@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from ..config.config import RouterConfig
+from ..config.secrets import _looks_like_literal_key, resolve_keys
 from ..context import RequestContext
 from ..exceptions import ConfigurationError, NoHealthyClientError, StreamError
 from ..metrics.metrics import MetricsCollector
@@ -138,6 +139,16 @@ class _StreamEnd:
 def _default_sdk_client(provider: str, api_key: str) -> Any:
     """Build the conventional SDK client for a provider in :meth:`from_cascade`."""
     provider = (provider or "").strip().lower()
+
+    if provider == "cohere":
+        try:
+            from cohere import AsyncClient as AsyncCohere  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover
+            raise ConfigurationError(
+                "Provider 'cohere' requires the 'cohere' package. "
+                "Install it with: pip install llmrouterx[cohere]"
+            ) from exc
+        return AsyncCohere(api_key=api_key)
 
     if provider == "anthropic":
         try:
@@ -649,6 +660,33 @@ class LLMRouter:
             )
         )
 
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        Re-rank ``documents`` against ``query`` using the best available
+        provider.
+
+        Returns a list of ``{"index": int, "relevance_score": float}`` dicts
+        sorted by relevance (highest first); ``index`` refers to the position
+        of the document in the input list. Requires a provider with a rerank
+        endpoint (Jina, Voyage, vLLM-style servers, Cohere).
+        """
+
+        return await self._track(
+            self._execute(
+                "rerank",
+                {
+                    "query": query,
+                    "documents": documents,
+                    **kwargs,
+                },
+            )
+        )
+
     async def stream(
         self,
         prompt: str,
@@ -840,6 +878,7 @@ class LLMRouter:
         cascade: list[str],
         *,
         client_factory: Any | None = None,
+        default_model: str | None = None,
     ) -> LLMRouter:
         """
         Quick-start factory for a simple fallback chain.
@@ -848,18 +887,29 @@ class LLMRouter:
         provider in the order given; the first that can serve a request wins.
         A provider SDK client is constructed automatically for you.
 
+        The key half may be a literal key or the *name* of an environment
+        variable (anything that does not look like a key). Environment names
+        are scanned: ``"openai:OPEN_AI_KEY"`` picks up ``OPEN_AI_KEY``,
+        ``OPEN_AI_KEY_1``, ``OPEN_AI_KEY_2``, ... (stopping at the first gap)
+        and registers one ClientNode per found key for rotation.
+
         Example::
 
             router = LLMRouter.from_cascade(
                 ["openai:sk-...", "anthropic:sk-ant-...", "groq:gsk-..."]
             )
+            router = LLMRouter.from_cascade(
+                ["openai:OPEN_AI_KEY", "groq:GROQ_API_KEY"],
+                default_model="gpt-4o",
+            )
 
         The default clients are ``AsyncOpenAI`` (for OpenAI-compatible
         providers such as ``openai``, ``groq``, ``together``, ``mistral``,
-        ``gemini``, ``nim``) and ``AsyncAnthropic`` (for ``anthropic``).
-        Providers that need a custom base URL/endpoint, or hand-built SDK
-        clients, should pass ``client_factory(provider, api_key)`` or build the
-        router with :meth:`from_config`.
+        ``gemini``, ``nim``), ``AsyncAnthropic`` (for ``anthropic``) and
+        ``AsyncCohere`` (for ``cohere``). Providers that need a custom base
+        URL/endpoint, or hand-built SDK clients, should pass
+        ``client_factory(provider, api_key)`` or build the router with
+        :meth:`from_providers`.
         """
         from ..adapters.factory import AdapterFactory
         from ..client.client_node import ClientNode
@@ -871,22 +921,144 @@ class LLMRouter:
             if ":" not in item:
                 raise ValueError(f"Cascade item {item!r} must be formatted as 'provider:api_key'.")
 
-            provider_name, api_key = item.split(":", 1)
-            client = (
-                client_factory(provider_name, api_key)
-                if client_factory is not None
-                else _default_sdk_client(provider_name, api_key)
-            )
+            provider_name, key_spec = item.split(":", 1)
 
-            adapter = AdapterFactory.create(
-                provider=provider_name,
-                client=client,
-            )
-            node = ClientNode(api_key=api_key, client=adapter)
-            providers.append(ProviderRouter(name=provider_name, clients=[node]))
+            if _looks_like_literal_key(key_spec):
+                key_sources = [key_spec]
+            else:
+                key_sources = resolve_keys({"api_key_env": key_spec})
+
+            nodes = []
+            for api_key in key_sources:
+                client = (
+                    client_factory(provider_name, api_key)
+                    if client_factory is not None
+                    else _default_sdk_client(provider_name, api_key)
+                )
+
+                adapter = AdapterFactory.create(
+                    provider=provider_name,
+                    client=client,
+                    default_model=default_model,
+                )
+                nodes.append(ClientNode(api_key=api_key, client=adapter))
+
+            providers.append(ProviderRouter(name=provider_name, clients=nodes))
 
         composite = CompositeRouter(providers)
         return cls(composite_router=composite)
+
+    @classmethod
+    def from_providers(
+        cls,
+        providers: list[dict[str, Any]],
+        *,
+        retry: Any | None = None,
+        middleware: list[BaseMiddleware] | None = None,
+        max_retries: int = 3,
+        max_concurrent_requests: int | None = None,
+        total_timeout: float | None = None,
+        client_factory: Any | None = None,
+    ) -> LLMRouter:
+        """
+        Ergonomic builder: declare providers and let the router wire itself.
+
+        Each provider dict accepts:
+
+        * ``provider`` (required): adapter name, e.g. ``openai``, ``groq``,
+          ``anthropic``, ``cohere``, ``together``, ``gemini``, ...
+        * ``key``: a literal API key.
+        * ``key_env``: the name of an environment variable; scanned for
+          numbered variants (``OPEN_AI_KEY`` -> ``OPEN_AI_KEY_1``, ...) by
+          default. Disable with ``key_env_scan: False``, or match arbitrary
+          variables with ``key_env_regex``.
+        * ``key_file``: a path to a file containing the key.
+        * ``model`` / ``embedding_model``: default models for the provider.
+        * ``base_url``: optional OpenAI-compatible base URL override.
+        * ``scheduler``: a scheduler instance for key rotation.
+        * ``clients``: a list of client dicts (as above) for multiple keys
+          with per-key options.
+
+        SDK clients are constructed automatically (pass ``client_factory`` to
+        supply your own). Example::
+
+            router = LLMRouter.from_providers([
+                {"provider": "openai", "key_env": "OPEN_AI_KEY", "model": "gpt-4o"},
+                {"provider": "groq", "key_env": "GROQ_API_KEY", "model": "llama-3.3-70b"},
+            ])
+        """
+        from ..adapters.factory import AdapterFactory
+        from ..client.client_node import ClientNode
+        from ..providers.composite_router import CompositeRouter
+        from ..providers.provider_router import ProviderRouter
+
+        def _client_config(client_cfg: dict[str, Any]) -> dict[str, Any]:
+            """Map user-facing ``key``/``key_env``/``key_file`` to config keys."""
+            cfg = dict(client_cfg)
+            if "key" in cfg and "api_key" not in cfg:
+                cfg["api_key"] = cfg.pop("key")
+            if "key_env" in cfg and "api_key_env" not in cfg:
+                cfg["api_key_env"] = cfg.pop("key_env")
+            if "key_env_scan" in cfg and "api_key_env_scan" not in cfg:
+                cfg["api_key_env_scan"] = cfg.pop("key_env_scan")
+            if "key_env_regex" in cfg and "api_key_env_regex" not in cfg:
+                cfg["api_key_env_regex"] = cfg.pop("key_env_regex")
+            if "key_file" in cfg and "api_key_file" not in cfg:
+                cfg["api_key_file"] = cfg.pop("key_file")
+            return cfg
+
+        def _build_client(
+            provider_name: str,
+            client_cfg: dict[str, Any],
+            api_key: str,
+        ) -> Any:
+            if client_factory is not None:
+                return client_factory(provider_name, api_key)
+            base_url = client_cfg.get("base_url")
+            if base_url is not None:
+                from openai import AsyncOpenAI  # type: ignore[import-not-found]
+
+                return AsyncOpenAI(api_key=api_key, base_url=base_url)
+            return _default_sdk_client(provider_name, api_key)
+
+        provider_routers: list[ProviderRouter] = []
+        for provider_cfg in providers:
+            if "provider" not in provider_cfg:
+                raise ValueError(f"Provider entry {provider_cfg!r} is missing a 'provider' key.")
+            provider_name = provider_cfg["provider"]
+
+            raw_clients = provider_cfg.get("clients") or [provider_cfg]
+            nodes: list[ClientNode] = []
+
+            for client_cfg in raw_clients:
+                keys = resolve_keys(_client_config(client_cfg))
+                for api_key in keys:
+                    client = _build_client(provider_name, client_cfg, api_key)
+                    adapter = AdapterFactory.create(
+                        provider=provider_name,
+                        client=client,
+                        default_model=client_cfg.get("model"),
+                        embedding_model=client_cfg.get("embedding_model"),
+                    )
+                    nodes.append(ClientNode(api_key=api_key, client=adapter))
+
+            provider_routers.append(
+                ProviderRouter(
+                    name=provider_name,
+                    clients=nodes,
+                    scheduler=provider_cfg.get("scheduler"),
+                )
+            )
+
+        composite = CompositeRouter(provider_routers)
+        return cls(
+            composite_router=composite,
+            retry=retry,
+            middleware=middleware,
+            max_retries=max_retries,
+            max_concurrent_requests=max_concurrent_requests,
+            total_timeout=total_timeout,
+        )
 
     # --------------------------------------------------------
     # Lifecycle

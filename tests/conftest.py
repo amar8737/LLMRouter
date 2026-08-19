@@ -24,6 +24,7 @@ class OpenAICompatibleClient:
         self.chat = type("Chat", (), {"completions": self._namespace(self._chat)})()
         self.responses = self._namespace(self._responses)
         self.embeddings = self._namespace(self._embeddings)
+        self.rerank = self._namespace(self._rerank)
         self.models = type("Models", (), {"list": self._models})()
 
     def set_handler(self, handler):
@@ -49,6 +50,17 @@ class OpenAICompatibleClient:
         if self.handler:
             return await self.handler("embeddings", kwargs)
         return _embedding_response([0.1, 0.2, 0.3])
+
+    async def _rerank(self, **kwargs):
+        self.calls.append(("rerank", kwargs))
+        if self.handler:
+            return await self.handler("rerank", kwargs)
+        return _rerank_response(
+            [
+                type("Result", (), {"index": 0, "relevance_score": 0.42})(),
+                type("Result", (), {"index": 1, "relevance_score": 0.91})(),
+            ]
+        )
 
     async def _models(self, **kwargs):
         self.calls.append(("models", kwargs))
@@ -79,6 +91,10 @@ def _embedding_response(vector):
         (),
         {"data": [type("Embedding", (), {"embedding": vector})()]},
     )()
+
+
+def _rerank_response(results):
+    return type("Response", (), {"results": results})()
 
 
 class AnthropicClient:
