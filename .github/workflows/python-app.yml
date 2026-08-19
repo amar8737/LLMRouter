@@ -19,7 +19,7 @@ jobs:
     - name: Install lint dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff
+        pip install ruff mypy types-PyYAML
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
     - name: Lint with ruff
       run: |

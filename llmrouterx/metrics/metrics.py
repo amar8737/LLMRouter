@@ -3,8 +3,12 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict, deque
+from collections.abc import Callable
 from statistics import mean, median
 from typing import Any
+
+# Type alias for the nested timing factory
+_NestedTimingFactory = Callable[[], "defaultdict[str, deque[float]]"]
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +102,11 @@ class MetricsCollector:
                     self._timings.pop(oldest)
                     self._labeled_timings.pop(oldest, None)
                 self._timings[key] = deque(maxlen=self._max_samples)
-                self._labeled_timings[key] = defaultdict(
-                    lambda: defaultdict(lambda: deque(maxlen=self._max_samples))  # type: ignore[return-value]
-                )  # type: ignore[assignment]
+
+                def _make_factory() -> defaultdict[str, deque[float]]:
+                    return defaultdict(lambda: deque(maxlen=self._max_samples))
+
+                self._labeled_timings[key] = defaultdict(_make_factory)  # type: ignore[assignment]
             self._timings[key].append(seconds)
 
             if labels:

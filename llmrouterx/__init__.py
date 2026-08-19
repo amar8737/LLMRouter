@@ -57,7 +57,7 @@ try:
     except PackageNotFoundError:
         __version__ = "0.1.31"
 except ImportError:  # pragma: no cover - pre-3.8 importlib.metadata shim
-    __version__ = "0.1.31"
+    __version__ = "0.1.32"
 
 __all__ = [
     "AdapterFactory",
